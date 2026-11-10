@@ -138,7 +138,13 @@ test('UART: ホストは、機器がセッションをやり直したら前の�
 test('ハンドシェイクが止まったら、決めた時間で閉じる', async () => {
   const [, b] = linePair();
   const host = new P.Session({ link: new P.UartLink(b), role: 'host', keys: keys('host'), caps: caps('host'), handshakeTimeoutMs: 30 });
-  await assert.rejects(host.start(), { code: 'handshake-timeout' });
+  // ハンドシェイクの時計は unref してあるので、ほかに待つものがないと、時計が鳴る前にイベントループが空になる(Node 22)。待つ間だけ保つ
+  const keep = setInterval(() => {}, 1000);
+  try {
+    await assert.rejects(host.start(), { code: 'handshake-timeout' });
+  } finally {
+    clearInterval(keep);
+  }
 });
 
 test('相手のメジャーバージョンが違えば、ペアリングを見る前に断る', async () => {
