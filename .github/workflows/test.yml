@@ -1,0 +1,41 @@
+# JavaScript と C のテスト。H8 の基板のファームウェアの組み立てと基板での確かめは、手元で行う
+name: test
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  javascript:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        node: ['22', '24']
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: optical-lab-device-protocol-reference
+      # spec/ が規格のリポジトリと同じかを確かめるため、規格のリポジトリも取り出す
+      - uses: actions/checkout@v4
+        with:
+          repository: NrivYuki/optical-lab-device-protocol
+          path: optical-lab-device-protocol
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+      - name: テスト
+        working-directory: optical-lab-device-protocol-reference/js
+        run: npm test
+      - name: C の表が spec/ から作ったものと同じかを確かめる
+        working-directory: optical-lab-device-protocol-reference
+        run: |
+          node tools/gen-c-labels.js
+          node tools/gen-c-vectors.js
+          git diff --exit-code
+
+  c:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: テスト
+        run: make -C c test
