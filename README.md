@@ -2,7 +2,7 @@
 
 OLDP(Optical Lab Device Protocol)第 1.0 版の参照実装である。機器の側を C で、ホストの側を JavaScript で書いた。機器の側には、H8/3069F の基板で動くファームウェアも含む。
 
-規格の文章・定義・テストベクタは、規格のリポジトリ optical-lab-device-protocol に置いている。テストの内容、基板で測った値、実装の制限、確かめていないことは、[docs/results.md](docs/results.md) にまとめた。
+規格の文章・定義・テストベクタは、規格のリポジトリ [optical-lab-device-protocol](https://github.com/NrivYuki/optical-lab-device-protocol) に置いている。テストの内容、基板で測った値、実装の制限、確かめていないことは、[docs/results.md](docs/results.md) にまとめた。
 
 ## フォルダ
 

@@ -1,6 +1,6 @@
 # 参照実装のテストと確認の結果
 
-OLDP(Optical Lab Device Protocol)第 1.0 版の参照実装について、テストの内容、H8/3069F の基板で測った値、実装の制限、確かめていないことをまとめる。規格の本文は、規格のリポジトリ optical-lab-device-protocol の `docs/spec.md` にある。
+OLDP(Optical Lab Device Protocol)第 1.0 版の参照実装について、テストの内容、H8/3069F の基板で測った値、実装の制限、確かめていないことをまとめる。規格の本文は、規格のリポジトリ [optical-lab-device-protocol](https://github.com/NrivYuki/optical-lab-device-protocol) の `docs/spec.md` にある。
 
 機器の側は C で書いた。動的なメモリ確保はしない。暗号の部品は、ChaCha20-Poly1305 に Monocypher 4.0.3 を使い、X25519 は 16 ビットの CPU 向けに `c/src/oldp_x25519.c` を、SHA-256 は `c/src/oldp_sha256.c` を書いた。ホストの側は JavaScript で書き、vca-hub の拡張で使う。
 
@@ -13,7 +13,7 @@ OLDP(Optical Lab Device Protocol)第 1.0 版の参照実装について、テス
 | JavaScript | `spec/vectors` の全て、セッションのバイト列(機器の側・ホストの側)、UART の再送とやり直し、誤りの扱い、UART の使用中に暗号で確かめられないフレームを捨てること、`REQUIRE=`、接続数の上限、`spec/` が規格のリポジトリと同じであること |
 | C | SHA-256(FIPS 180)、HMAC(RFC 4231)、X25519(RFC 7748 の例・1000 回の繰り返し・Monocypher との比較)、ChaCha20-Poly1305(RFC 8439)、`spec/vectors` の全て(TCP・UART のセッションのバイト列を含む)、機器の誤りの扱い、UART の使用中に暗号で確かめられないフレームを捨てること、`REQUIRE=`、線の上でフレームが失われたり壊れたりしたときの再送 |
 
-vca-hub を通した確認(vca-hub-extension のリポジトリ):
+vca-hub を通した確認([vca-hub-extension](https://github.com/NrivYuki/vca-hub-extension) のリポジトリ):
 
 | 対象 | 内容 |
 |---|---|
