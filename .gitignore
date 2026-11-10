@@ -1,0 +1,15 @@
+# 機器の秘密鍵と乱数の種(無ければ tools/gen-h8-assets.js が作る)
+c/h8/devkey.h
+
+# 組み立てた物(本体のものは鍵と種を含む)
+*.elf
+*.mot
+asm/
+c/sim_device
+c/test_vectors
+c/test_device
+
+# 模擬機器の鍵と覚えたホスト
+tools/.sim-device/
+
+node_modules/

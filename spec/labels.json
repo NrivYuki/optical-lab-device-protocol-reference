@@ -1,0 +1,78 @@
+{
+  "version": "1.0",
+  "about": "項目の辞書(規格の正本)。名前と単位は VCA(DCS)に合わせる。kind: single=値 1 つ / chiral=右眼;左眼 / either=値 1 つ(両眼)か右眼;左眼 / list=値の並び(行を重ねて続ける)。type: int=整数 / dec=固定小数点の文字(scale は小数点以下の桁数の上限。整数×10^scale で扱う) / enum=決まった値 / text=文字(max は文字数) / fields=決まった並び",
+  "labels": {
+    "JOB": { "kind": "single", "type": "text", "max": 40, "about": "ジョブの名前(人が付けた名前)" },
+    "DO": { "kind": "single", "type": "enum", "values": { "R": "右眼だけ", "L": "左眼だけ", "B": "両眼", "N": "どちらでもない" }, "about": "このジョブで扱う眼" },
+    "STATUS": { "kind": "single", "type": "fields", "fields": [{ "type": "int" }, { "type": "text", "max": 60, "optional": true }], "about": "結果の番号と説明(番号は messages.json の status)" },
+    "TIME": { "kind": "single", "type": "text", "max": 14, "pattern": "^[0-9]{14}$", "about": "協定世界時の年月日時分秒(YYYYMMDDhhmmss)" },
+    "DEV": { "kind": "single", "type": "text", "max": 3, "about": "機器の種類(DCS の DEV に合わせる。TRC・EDG など)" },
+    "VEN": { "kind": "single", "type": "text", "max": 16, "about": "メーカー" },
+    "MODEL": { "kind": "single", "type": "text", "max": 16, "about": "機種" },
+    "SN": { "kind": "single", "type": "text", "max": 30, "about": "製造番号" },
+    "IGNORED": { "kind": "list", "type": "text", "max": 40, "about": "知らない・使わないので捨てた項目のラベル" },
+    "REJECTED": { "kind": "list", "type": "text", "max": 40, "about": "値を受けられなかった項目のラベル" },
+    "EVENT": { "kind": "single", "type": "enum", "values": { "DONE": "加工を終えた", "ERROR": "加工を続けられない", "STATE": "機器の状態の知らせ" }, "about": "INFO の知らせの種類" },
+    "TEXT": { "kind": "single", "type": "text", "max": 60, "about": "人が読む説明" },
+
+    "TRCFMT": {
+      "kind": "single", "type": "fields",
+      "fields": [
+        { "type": "enum", "values": { "1": "文字の半径(この規格で使える形式はこれだけ)" } },
+        { "type": "int", "min": 3, "max": 10000, "about": "点の数" },
+        { "type": "enum", "values": { "E": "等角度", "U": "不等角度(A の並びで角度を添える)" } },
+        { "type": "enum", "values": { "R": "右眼", "L": "左眼" } },
+        { "type": "enum", "values": { "F": "フレーム", "P": "型板", "D": "デモレンズ" } }
+      ],
+      "about": "玉型の始まり。続く R(と A)がこの眼の玉型"
+    },
+    "R": { "kind": "list", "type": "int", "min": 0, "max": 99999, "unit": "0.01 mm", "about": "玉型の半径" },
+    "A": { "kind": "list", "type": "int", "min": 0, "max": 35999, "unit": "0.01 度", "about": "不等角度のときの、点ごとの角度" },
+
+    "HBOX": { "kind": "either", "type": "dec", "scale": 2, "unit": "mm", "about": "玉型の箱の幅" },
+    "VBOX": { "kind": "either", "type": "dec", "scale": 2, "unit": "mm", "about": "玉型の箱の高さ" },
+    "CIRC": { "kind": "either", "type": "dec", "scale": 2, "unit": "mm", "about": "玉型の周長" },
+    "DBL": { "kind": "single", "type": "dec", "scale": 2, "unit": "mm", "about": "鼻幅(左右の箱の間)" },
+    "FCRV": { "kind": "either", "type": "dec", "scale": 2, "signed": true, "unit": "D", "about": "フレームのカーブ" },
+
+    "SPH": { "kind": "chiral", "type": "dec", "scale": 2, "signed": true, "unit": "D", "about": "球面度数" },
+    "CYL": { "kind": "chiral", "type": "dec", "scale": 2, "signed": true, "unit": "D", "about": "円柱度数" },
+    "AX": { "kind": "chiral", "type": "dec", "scale": 2, "unit": "度", "about": "円柱軸" },
+    "ADD": { "kind": "chiral", "type": "dec", "scale": 2, "signed": true, "unit": "D", "about": "加入度数" },
+    "IPD": { "kind": "chiral", "type": "dec", "scale": 2, "unit": "mm", "about": "片眼の瞳孔間距離(遠用)" },
+    "NPD": { "kind": "chiral", "type": "dec", "scale": 2, "unit": "mm", "about": "片眼の瞳孔間距離(近用)" },
+    "OCHT": { "kind": "chiral", "type": "dec", "scale": 2, "unit": "mm", "about": "光学中心の高さ" },
+    "SEGHT": { "kind": "chiral", "type": "dec", "scale": 2, "unit": "mm", "about": "小玉・累進の基準の高さ" },
+    "LIND": { "kind": "chiral", "type": "dec", "scale": 3, "about": "レンズの屈折率" },
+    "LMATID": { "kind": "chiral", "type": "int", "about": "レンズの素材の番号" },
+    "DIA": { "kind": "chiral", "type": "dec", "scale": 2, "unit": "mm", "about": "レンズの外径" },
+
+    "ETYP": {
+      "kind": "single", "type": "enum",
+      "values": { "-1": "加工しない", "1": "ヤゲン", "2": "平(縁なし)", "3": "溝", "4": "ミニヤゲン", "5": "T ヤゲン", "6": "U ヤゲン" },
+      "about": "縁の加工"
+    },
+    "BEVP": {
+      "kind": "either", "type": "enum",
+      "values": { "0": "手動", "1": "前面から(BEVM mm)", "2": "前面からの割合(BEVM %)", "3": "フレームカーブに沿う(BEVC・BEVM)", "4": "前後の中央", "5": "後面から(BEVM mm)", "7": "加工機の設定に従う", "10": "フリーフロート" },
+      "about": "ヤゲン・溝の位置の決め方"
+    },
+    "BEVM": { "kind": "chiral", "type": "dec", "scale": 2, "about": "ヤゲン・溝の位置(BEVP によって mm か %)" },
+    "BEVC": { "kind": "chiral", "type": "dec", "scale": 2, "about": "ヤゲン・溝を沿わせるカーブ" },
+    "POLISH": {
+      "kind": "single", "type": "enum",
+      "values": { "0": "磨かない", "1": "縁と面取りを磨く", "2": "面取りだけ磨く", "3": "縁だけ磨く" },
+      "about": "磨き"
+    },
+    "PINB": { "kind": "chiral", "type": "dec", "scale": 2, "unit": "mm", "about": "後面側の面取りの幅" },
+    "FPINB": { "kind": "chiral", "type": "dec", "scale": 2, "unit": "mm", "about": "前面側の面取りの幅" },
+    "GWIDTH": { "kind": "chiral", "type": "dec", "scale": 2, "unit": "mm", "about": "溝の幅" },
+    "GDEPTH": { "kind": "chiral", "type": "dec", "scale": 2, "unit": "mm", "about": "溝の深さ" }
+  },
+  "rules": [
+    { "if": { "label": "BEVP", "in": ["1", "2", "3", "5"] }, "require": ["BEVM"], "about": "位置を mm か % で決める方法では、BEVM が要る" },
+    { "if": { "label": "BEVP", "in": ["3"] }, "require": ["BEVC"], "about": "フレームカーブに沿う方法では、BEVC が要る" },
+    { "if": { "label": "TRCFMT", "field": 2, "in": ["U"] }, "require": ["A"], "about": "不等角度の玉型には、角度の並びが要る" }
+  ],
+  "vendor": { "pattern": "^[A-Z][A-Z0-9]{1,7}:[A-Z0-9_]{1,16}$", "about": "メーカー独自の項目は「名前空間:名前」。名前空間はケイパビリティの通知(EXT)で宣言する" }
+}

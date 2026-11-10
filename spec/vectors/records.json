@@ -1,0 +1,42 @@
+{
+  "about": "受けたジョブの項目の扱いのテストベクタ(規格 10・11 章と labels.json の定義から手で決めたもの)。accept: 機器が申告した項目(null は辞書のすべて)、ext: 宣言した名前空間。used・ignored・rejected はラベルの集合、badTrace は玉型の点の数が合わないこと",
+  "cases": [
+    { "name": "決まった形の値はすべて使う", "accept": null, "ext": [], "lines": ["JOB=A-1", "DBL=18.00", "SPH=-4.00;-3.50", "HBOX=52.00", "POLISH=1", "ETYP=-1"], "used": ["DBL", "SPH", "HBOX", "POLISH", "ETYP"], "ignored": [], "rejected": [], "badTrace": false },
+    { "name": "小数点以下の桁は上限より少なくてよい", "accept": null, "ext": [], "lines": ["DBL=18", "HBOX=52.5", "LIND=1.600;1.5"], "used": ["DBL", "HBOX", "LIND"], "ignored": [], "rejected": [], "badTrace": false },
+    { "name": "辞書に無い項目と宣言していない名前空間は捨てる", "accept": null, "ext": ["ACME"], "lines": ["FOO=1", "ACME:MODE=2", "BETA:X=1"], "used": ["ACME:MODE"], "ignored": ["FOO", "BETA:X"], "rejected": [], "badTrace": false },
+    { "name": "申告していない項目は、辞書にあっても捨てる", "accept": ["DBL"], "ext": [], "lines": ["DBL=18.00", "SPH=-1.00;-1.00"], "used": ["DBL"], "ignored": ["SPH"], "rejected": [], "badTrace": false },
+    { "name": "宣言した名前空間でも、申告していなければ捨てる", "accept": ["DBL"], "ext": ["ACME"], "lines": ["DBL=18.00", "ACME:MODE=2"], "used": ["DBL"], "ignored": ["ACME:MODE"], "rejected": [], "badTrace": false },
+    { "name": "小数点以下の桁が上限より多い値は受けない", "accept": null, "ext": [], "lines": ["DBL=18.001", "LIND=1.6000;1.600"], "used": [], "ignored": [], "rejected": ["DBL", "LIND"], "badTrace": false },
+    { "name": "負を許さない項目の負の値は受けない", "accept": null, "ext": [], "lines": ["HBOX=-1.00"], "used": [], "ignored": [], "rejected": ["HBOX"], "badTrace": false },
+    { "name": "DCS の ? は値として受けない", "accept": null, "ext": [], "lines": ["DBL=?"], "used": [], "ignored": [], "rejected": ["DBL"], "badTrace": false },
+    { "name": "決まった値に無いものは受けない", "accept": null, "ext": [], "lines": ["ETYP=9", "DO=X"], "used": [], "ignored": [], "rejected": ["ETYP", "DO"], "badTrace": false },
+    { "name": "値の数: 右眼;左眼の項目に 1 つだけ", "accept": null, "ext": [], "lines": ["SPH=-1.00"], "used": [], "ignored": [], "rejected": ["SPH"], "badTrace": false },
+    { "name": "値の数: 1 つの項目に 2 つ", "accept": null, "ext": [], "lines": ["DBL=18;18"], "used": [], "ignored": [], "rejected": ["DBL"], "badTrace": false },
+    { "name": "値の数: 1 つか 2 つの項目に 3 つ", "accept": null, "ext": [], "lines": ["HBOX=1;2;3"], "used": [], "ignored": [], "rejected": ["HBOX"], "badTrace": false },
+    { "name": "桁数の上限ちょうどの小数は受ける(10^scale 倍で 9 桁)", "accept": null, "ext": [], "lines": ["DBL=1234567.00"], "used": ["DBL"], "ignored": [], "rejected": [], "badTrace": false },
+    { "name": "10^scale 倍で 10 桁になる小数は受けない", "accept": null, "ext": [], "lines": ["DBL=12345678.00"], "used": [], "ignored": [], "rejected": ["DBL"], "badTrace": false },
+    { "name": "玉型の半径の範囲", "accept": null, "ext": [], "lines": ["R=0;99999"], "used": ["R"], "ignored": [], "rejected": [], "badTrace": false },
+    { "name": "玉型の半径の上限を超える", "accept": null, "ext": [], "lines": ["R=100000"], "used": [], "ignored": [], "rejected": ["R"], "badTrace": false },
+    { "name": "10 桁の整数は受けない", "accept": null, "ext": [], "lines": ["LMATID=1234567890;1"], "used": [], "ignored": [], "rejected": ["LMATID"], "badTrace": false },
+    { "name": "形式 1 以外の玉型は受けない", "accept": null, "ext": [], "lines": ["TRCFMT=2;3;E;R;F", "R=1;2;3"], "used": ["R"], "ignored": [], "rejected": ["TRCFMT"], "badTrace": false },
+    { "name": "点の数が合う玉型", "accept": null, "ext": [], "lines": ["TRCFMT=1;4;E;R;F", "R=1;2", "R=3;4"], "used": ["TRCFMT", "R"], "ignored": [], "rejected": [], "badTrace": false },
+    { "name": "点の数が足りない玉型", "accept": null, "ext": [], "lines": ["TRCFMT=1;4;E;R;F", "R=1;2;3"], "used": ["TRCFMT", "R"], "ignored": [], "rejected": [], "badTrace": true },
+    { "name": "不等角度の玉型に角度が無い", "accept": null, "ext": [], "lines": ["TRCFMT=1;3;U;L;F", "R=1;2;3"], "used": ["R"], "ignored": [], "rejected": ["TRCFMT"], "badTrace": true },
+    { "name": "不等角度の玉型に角度がある", "accept": null, "ext": [], "lines": ["TRCFMT=1;3;U;L;F", "R=1;2;3", "A=0;12000;24000"], "used": ["TRCFMT", "R", "A"], "ignored": [], "rejected": [], "badTrace": false },
+    { "name": "角度の範囲を超える", "accept": null, "ext": [], "lines": ["A=36000"], "used": [], "ignored": [], "rejected": ["A"], "badTrace": false },
+    { "name": "両眼の玉型の 2 つめだけ点の数が違う", "accept": null, "ext": [], "lines": ["TRCFMT=1;3;E;R;F", "R=1;2;3", "TRCFMT=1;4;E;L;F", "R=1;2;3"], "used": ["TRCFMT", "R"], "ignored": [], "rejected": [], "badTrace": true },
+    { "name": "BEVP=3 には BEVM と BEVC が要る", "accept": null, "ext": [], "lines": ["BEVP=3", "BEVM=1.00;1.00"], "used": ["BEVM"], "ignored": [], "rejected": ["BEVP"], "badTrace": false },
+    { "name": "BEVP=3 に BEVM と BEVC がある", "accept": null, "ext": [], "lines": ["BEVP=3", "BEVM=1.00;1.00", "BEVC=4.00;4.00"], "used": ["BEVP", "BEVM", "BEVC"], "ignored": [], "rejected": [], "badTrace": false },
+    { "name": "BEVP=7 には BEVM は要らない", "accept": null, "ext": [], "lines": ["BEVP=7"], "used": ["BEVP"], "ignored": [], "rejected": [], "badTrace": false },
+    { "name": "決まった形の時刻", "accept": null, "ext": [], "lines": ["TIME=20261109120000"], "used": ["TIME"], "ignored": [], "rejected": [], "badTrace": false },
+    { "name": "形の違う時刻", "accept": null, "ext": [], "lines": ["TIME=2026"], "used": [], "ignored": [], "rejected": ["TIME"], "badTrace": false },
+    { "name": "番号と説明の項目", "accept": null, "ext": [], "lines": ["STATUS=0;ok"], "used": ["STATUS"], "ignored": [], "rejected": [], "badTrace": false },
+    { "name": "番号が数でない", "accept": null, "ext": [], "lines": ["STATUS=x"], "used": [], "ignored": [], "rejected": ["STATUS"], "badTrace": false },
+    { "name": "説明の文字数の上限を超える", "accept": null, "ext": [], "lines": ["TEXT=1234567890123456789012345678901234567890123456789012345678901"], "used": [], "ignored": [], "rejected": ["TEXT"], "badTrace": false }
+  ],
+  "malformed": [
+    "123456789012345678901234567890123456789012345678901234567890123456789012345678901",
+    "ラベルの無い行",
+    "=1"
+  ]
+}

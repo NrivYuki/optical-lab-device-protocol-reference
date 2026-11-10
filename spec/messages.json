@@ -1,0 +1,65 @@
+{
+  "name": "optical-lab-device-protocol",
+  "version": "1.0",
+  "frame": {
+    "version": 1,
+    "minSize": 512,
+    "maxSize": 65535,
+    "types": { "hs1": 1, "hs2": 2, "hs3": 3, "data": 16, "fail": 127 }
+  },
+  "message": {
+    "headerSize": 4,
+    "flags": { "more": 1, "response": 2 },
+    "maxLineLength": 80,
+    "maxBodySize": 262144,
+    "acceptReqId": 0,
+    "ops": { "PUT": 1, "GET": 2, "DATA": 3, "RESULT": 4, "AVAIL": 5, "INFO": 6, "TIME": 7, "PING": 8 },
+    "vendorOpsFrom": 128,
+    "standardExtPrefix": "OLDP"
+  },
+  "status": {
+    "0": "受け付けた",
+    "1": "ジョブが見つからない",
+    "2": "メッセージの形が正しくない",
+    "3": "対応していない操作",
+    "4": "受けられない値がある",
+    "5": "大きすぎる",
+    "6": "いまは受けられない(取り込み中など)",
+    "7": "相手の内部の誤り"
+  },
+  "fail": {
+    "1": "バージョンが合わない",
+    "2": "ハンドシェイクに失敗した",
+    "3": "ペアリングしていない相手",
+    "4": "フレームの形が正しくない",
+    "5": "必要な拡張に対応していない"
+  },
+  "result": {
+    "ignored": "IGNORED",
+    "rejected": "REJECTED"
+  },
+  "capabilities": {
+    "labels": ["VER", "DEV", "VEN", "MODEL", "SN", "MAXFRAME", "LABELS", "TRACE", "EXT", "REQUIRE"],
+    "required": ["VER", "DEV", "VEN", "MODEL", "MAXFRAME"],
+    "repeatable": ["LABELS", "EXT", "REQUIRE"]
+  },
+  "noise": {
+    "protocol": "Noise_XX_25519_ChaChaPoly_SHA256",
+    "prologue": "optical-lab-device-protocol 1",
+    "initiator": "device",
+    "fingerprint": { "hash": "SHA-256", "bytes": 10, "groupSize": 4, "format": "base32-crockford" }
+  },
+  "timeouts": { "handshakeMs": 120000, "responseMs": 30000 },
+  "pairing": { "windowMs": 300000 },
+  "tcp": { "lengthBytes": 2, "defaultPort": 33520, "maxHandshakes": 8 },
+  "uart": {
+    "default": { "baud": 9600, "dataBits": 8, "parity": "none", "stopBits": 1 },
+    "bauds": [9600, 19200, 38400, 57600, 115200],
+    "baudTolerancePercent": 2.5,
+    "crc": "CRC-32",
+    "delimiter": 0,
+    "kinds": { "frame": 0, "ack": 1 },
+    "ackTimeoutMs": 1000,
+    "retries": 5
+  }
+}
