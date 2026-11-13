@@ -12,6 +12,7 @@
 #define SCI1_TDR REG8(0xffffbb)
 #define SCI1_SSR REG8(0xffffbc)
 #define SCI1_RDR REG8(0xffffbd)
+#define SCR_RIE  0x40
 #define SCR_TE   0x20
 #define SCR_RE   0x10
 #define SSR_TDRE 0x80
@@ -19,6 +20,7 @@
 #define SSR_ORER 0x20
 #define SSR_FER  0x10
 #define SSR_PER  0x08
+#define SSR_TEND 0x04
 
 /* ポートとバス(7 章・6 章) */
 #define P1DDR    REG8(0xfee000)

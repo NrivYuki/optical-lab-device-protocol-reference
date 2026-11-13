@@ -1,5 +1,5 @@
 /* H8/3069F の基板で動く、Optical Lab Device Protocol の機器。内蔵フラッシュから起動する。
- * SCI1(9600 bps、8 ビット、パリティなし、ストップ 1)で、1 行ずつコマンドを受け付ける。
+ * SCI1(既定は 9600 bps。8 ビット、パリティなし、ストップ 1)で、1 行ずつコマンドを受け付ける。
  *   id             この機器の鍵のフィンガープリントを返す
  *   pair           ペアリングの受付(5 分、または次のセッションまで。知らないホストの鍵を覚える)
  *   hosts          覚えたホストの一覧
@@ -12,15 +12,23 @@
  *   ip [IP マスク ゲートウェイ ホスト ポート]  LAN の設定を見る・書く(フラッシュに残す)
  *   via lan|uart   put・get・ops・wait のトランスポートを選ぶ(既定は uart)
  *   lan            LAN コントローラの状態と数を返す
+ *   baud [速度]    線の速度を見る・変える(9600・19200・38400・57600。フラッシュに残す)。"ok" を今の速度で返してから切り替える。
+ *                  115200 も受け付けるが、20 MHz では実際の速度が 125000 bps(+8.5%)になり、規格の差の範囲(4 章)に合わない。
+ *                  更新の仕組みは常に 9600 bps で動く
  *   rekey 1        機器の鍵を新しい鍵に替える(標準の拡張 OLDPKEY。ホストが受け付けたらフラッシュに残す)
  *   keyreset       書き込んだときの鍵に戻す
  *   bench          X25519 を 1 回計算する前後に "bench-start" "bench-end" を返す(時間は PC の側で測る)
  *   log            最後のセッションの結果を返す
  *   reset          起動の入口へ飛ぶ(更新の仕組みが 500 ms だけ合図を待つ)
  *   update         更新の仕組みへ移る。あとは PC の tools/h8-update.ps1 が本体を書き換える
+ *   loader         更新の仕組み(EB0)を書き換える。"ready" を返したあと、長さ(4)・CRC-32(4)・中身を受け、EB0 を消して書き、
+ *                  読み直して CRC-32 を比べる(PC の tools/h8-update.ps1 -Loader が使う)。書く間に電源が切れたら、ブートモードで書き直す
  * put・get・ops・wait は "start" を返したあと、via uart では同じ線を UART のトランスポートとして使い(via lan なら線は結果の表示にだけ使う)、終わると少し待ってから
  * "OLDP-END <戻り値> <STATUS>" を返す(PC の中継は、これを見てホストとの間を切る)。
- * 乱数: 機器ごとの秘密の種(devkey.h)に、受け取った文字の到着の時刻を SHA-256 で混ぜて使う(規格 2 章)。 */
+ * 乱数: 機器ごとの秘密の種(devkey.h)に、受け取った文字の到着の時刻を SHA-256 で混ぜて使う(規格 2 章)。
+ * 受信: SCI1 の受信は割り込みで受け、リングバッファにためる(重い計算の間に届いた文字を落とさないため)。
+ *       割り込みのベクタは更新の仕組み(EB0)にあり、RAM の 0xffff00(ERI1)・0xffff04(RXI1)へ飛ぶ。そこへ本体が飛び先を書く。
+ *       ベクタがそうなっていない古い更新の仕組みでは、割り込みを使わずに読みに行く。 */
 #include <stdint.h>
 #include <stddef.h>
 #include "string.h"
@@ -52,8 +60,7 @@ uint32_t now_ms(void) {
 }
 
 /* ---- 乱数: 秘密の種に、文字の到着の時刻を混ぜる ----
- * 受けるたびに SHA-256 を計算すると、H8 では 1 文字の間隔(9600 bps で約 1 ms)より長くかかり、SCI1 の受け場所が
- * あふれて文字が落ちる。受けたときは小さな配列に混ぜ込むだけにし、SHA-256 は乱数を取り出すときにまとめて行う */
+ * 文字を受けるのは割り込みの中なので、小さな配列に混ぜ込むだけにし、SHA-256 は乱数を取り出すときにまとめて行う */
 static oldp_sha256_ctx pool;
 static uint32_t rng_count;
 static uint8_t ent[64];
@@ -84,9 +91,80 @@ static void rng(uint8_t *buf, size_t n) {
     }
 }
 
+/* ---- 受信 ----
+ * 割り込みで受けて、リングバッファにためる。大きさは、内蔵 RAM の残り(変数は 0xffdf20 より下に置く。rom.ld)で決めた。
+ * 1 つのフレームの全部(最大で約 520 バイト)は入らないが、フレームを処理する間に届く分を受けられればよい */
+#define RXQ 384
+#define TRAMP 0x00ffff00UL                    /* 割り込みの飛び先を書く RAM(ERI1 は +0、RXI1 は +4) */
+/* 0 番地からのベクタ表を読む(定数の番地を直に読むと、gcc が配列の範囲外と警告するので、番地を asm で隠す) */
+static uint32_t vector(uint8_t n) {
+    const volatile uint32_t *p = 0;
+    __asm__ ("" : "+r" (p));
+    return p[n];
+}
+/* フラッシュの番地を指す(0 番地を含む) */
+static const uint8_t *flash_at(uint32_t a) {
+    const uint8_t *p = 0;
+    __asm__ ("" : "+r" (p));
+    return p + a;
+}
+static volatile uint8_t rxq[RXQ];
+static volatile uint16_t rxq_head, rxq_tail;   /* head は割り込みが、tail は本体が進める */
+static volatile uint16_t sci_err, rxq_lost;    /* SCI1 の受信の誤り(オーバーラン・フレーミング・パリティ)と、バッファがあふれて捨てた数。セッションごとに数え直す */
+static uint8_t irq_on;
+
+void sci1_isr(void) __attribute__((interrupt_handler));
+void sci1_isr(void) {
+    unsigned char s = SCI1_SSR;
+    if (s & (SSR_ORER | SSR_FER | SSR_PER)) {
+        sci_err++;
+        SCI1_SSR = (unsigned char)(s & ~(SSR_ORER | SSR_FER | SSR_PER | SSR_RDRF));
+        return;
+    }
+    if (s & SSR_RDRF) {
+        uint8_t c = SCI1_RDR;
+        uint16_t h = rxq_head, n = (uint16_t)(h + 1 == RXQ ? 0 : h + 1);
+        SCI1_SSR = (unsigned char)(s & ~SSR_RDRF);
+        if (n != rxq_tail) { rxq[h] = c; rxq_head = n; } else rxq_lost++;
+        stir(c);
+    }
+}
+
+/* 更新の仕組みのベクタが RAM の飛び先を指していれば、飛び先を書いて受信の割り込みを使う */
+static void irq_init(void) {
+    volatile uint8_t *t = (volatile uint8_t *)TRAMP;
+    uint32_t a = (uint32_t)sci1_isr;
+    uint8_t i;
+    if (vector(56) != TRAMP || vector(57) != TRAMP + 4) return;   /* 56 番が ERI1、57 番が RXI1 */
+    for (i = 0; i < 8; i += 4) {               /* JMP @aa:24 */
+        t[i] = 0x5a; t[i + 1] = (uint8_t)(a >> 16); t[i + 2] = (uint8_t)(a >> 8); t[i + 3] = (uint8_t)a;
+    }
+    irq_on = 1;
+    SCI1_SCR = (unsigned char)(SCI1_SCR | SCR_RIE);
+    __asm__ volatile ("andc #0x7f,ccr");
+}
+
+/* フラッシュを消す・書く間は、ベクタ(フラッシュの中)を読めないので、割り込みを止める */
+static uint8_t store_block_safe(const uint8_t *p, uint32_t addr, uint8_t block, uint16_t pages) {
+    uint8_t r;
+    __asm__ volatile ("orc #0x80,ccr");
+    r = store_block(p, addr, block, pages);
+    if (irq_on) __asm__ volatile ("andc #0x7f,ccr");
+    return r;
+}
+static uint8_t store_safe(const uint8_t *p, uint32_t addr, uint8_t block) { return store_block_safe(p, addr, block, 1); }
+
 static int getc_now(void) {
-    unsigned char s = SCI1_SSR, c;
-    if (s & (SSR_ORER | SSR_FER | SSR_PER)) { SCI1_SSR = (unsigned char)(s & ~(SSR_ORER | SSR_FER | SSR_PER | SSR_RDRF)); return -1; }
+    unsigned char s, c;
+    if (irq_on) {
+        uint16_t t = rxq_tail;
+        if (t == rxq_head) return -1;
+        c = rxq[t];
+        rxq_tail = (uint16_t)(t + 1 == RXQ ? 0 : t + 1);
+        return c;
+    }
+    s = SCI1_SSR;
+    if (s & (SSR_ORER | SSR_FER | SSR_PER)) { sci_err++; SCI1_SSR = (unsigned char)(s & ~(SSR_ORER | SSR_FER | SSR_PER | SSR_RDRF)); return -1; }
     if (!(s & SSR_RDRF)) return -1;
     c = SCI1_RDR;
     SCI1_SSR = (unsigned char)(s & ~SSR_RDRF);
@@ -136,7 +214,8 @@ static int io_read(void *ctx, uint8_t *buf, size_t n, uint32_t timeout_ms) {
 #define HOST_MAX 4
 #define STORE_ADDR 0x70000UL
 #define STORE_BLOCK 15
-typedef struct { uint8_t magic[4]; uint8_t count; uint8_t pad[3]; char hosts[HOST_MAX][20]; net_cfg net; uint8_t rest[16]; uint32_t crc; } host_page;   /* 128 バイト */
+/* brr: 線の速度(SCI1 の BRR の値)。0xff は既定の 9600 bps */
+typedef struct { uint8_t magic[4]; uint8_t count; uint8_t pad[3]; char hosts[HOST_MAX][20]; net_cfg net; uint8_t brr; uint8_t rest[15]; uint32_t crc; } host_page;   /* 128 バイト */
 static host_page page __attribute__((aligned(4)));
 static uint8_t pairing, dirty;
 static uint32_t pair_until;
@@ -145,14 +224,44 @@ static const uint8_t MAGIC[4] = { 'V', 'H', '1', 0 };
 static void hosts_load(void) {
     const host_page *p = (const host_page *)STORE_ADDR;
     if (!memcmp(p->magic, MAGIC, 4) && p->count <= HOST_MAX && oldp_crc32((const uint8_t *)p, 124) == p->crc) memcpy(&page, p, sizeof page);
-    else { memset(&page, 0, sizeof page); memcpy(page.magic, MAGIC, 4); }
+    else { memset(&page, 0, sizeof page); memcpy(page.magic, MAGIC, 4); page.brr = 0xff; }
 }
 
 static void hosts_save(void) {
     memset(page.rest, 0xff, sizeof page.rest);
     page.crc = oldp_crc32((const uint8_t *)&page, 124);
-    if (store_page((const uint8_t *)&page, STORE_ADDR, STORE_BLOCK)) put_text("\r\nstore-failed");
+    if (store_safe((const uint8_t *)&page, STORE_ADDR, STORE_BLOCK)) put_text("\r\nstore-failed");
     dirty = 0;
+}
+
+/* ---- 線の速度 ----
+ * 20 MHz、φ/1 では、BRR = 20 MHz / (32 × 速度) - 1。実際の速度と差は、
+ *   9600: 64 → 9615 bps(+0.16%)  19200: 32 → 18939 bps(-1.36%)  38400: 15 → 39063 bps(+1.73%)
+ *   57600: 10 → 56818 bps(-1.36%)  115200: 4 → 125000 bps(+8.51%。規格 4 章の差の範囲に合わない) */
+static const struct { uint32_t bps; uint8_t brr; } BAUDS[] = { { 9600, 64 }, { 19200, 32 }, { 38400, 15 }, { 57600, 10 }, { 115200, 4 } };
+#define BRR_DEFAULT 64
+
+static uint8_t brr_now(void) {
+    uint8_t i;
+    for (i = 0; i < sizeof BAUDS / sizeof BAUDS[0]; i++) if (BAUDS[i].brr == page.brr) return page.brr;
+    return BRR_DEFAULT;
+}
+
+static uint32_t bps_of(uint8_t brr) {
+    uint8_t i;
+    for (i = 0; i < sizeof BAUDS / sizeof BAUDS[0]; i++) if (BAUDS[i].brr == brr) return BAUDS[i].bps;
+    return 9600;
+}
+
+/* 送り終えてから(TEND)、速度を切り替える */
+static void set_brr(uint8_t brr) {
+    volatile uint32_t i;
+    while (!(SCI1_SSR & SSR_TEND)) now_ms();
+    SCI1_SCR = 0;
+    SCI1_BRR = brr;
+    for (i = 0; i < 2000; i++) ;      /* 1 ビットの時間より長く待つ */
+    SCI1_SCR = (unsigned char)(SCR_TE | SCR_RE | (irq_on ? SCR_RIE : 0));
+    SCI1_SSR = (unsigned char)(SCI1_SSR & ~(SSR_ORER | SSR_FER | SSR_PER));
 }
 
 static int trust(void *app, const uint8_t pub[32], const char *fp, const char *caps, size_t len) {
@@ -260,11 +369,14 @@ static int session_open(void) {
     dev.on_request = on_request;
     dev.s_pub = my_pub;
     avail_job[0] = 0;
+    sci_err = 0; rxq_lost = 0;
     return oldp_dev_open(&dev);
 }
 
+/* PUT の中身を作る場所。loader コマンドでは、更新の仕組みの中身を受ける場所に使う(RAM の残りが少ないため) */
+static char body[sizeof JOB_LINES + 64] __attribute__((aligned(4)));
+
 static int op_put(const char *job, int *st) {
-    static char body[sizeof JOB_LINES + 64];
     size_t n = 0, k = strlen(job);
     uint8_t rop;
     memcpy(body, "JOB=", 4); n = 4;
@@ -367,12 +479,40 @@ static void do_rekey(void) {
             oldp_fingerprint(kp.pub, kp.fp);
             memset(kp.rest, 0xff, sizeof kp.rest);
             kp.crc = oldp_crc32((const uint8_t *)&kp, 124);
-            if (store_page((const uint8_t *)&kp, KEY_ADDR, KEY_BLOCK)) put_text("\r\nstore-failed");
+            if (store_safe((const uint8_t *)&kp, KEY_ADDR, KEY_BLOCK)) put_text("\r\nstore-failed");
             keys_load();
         }
         memset(&kp, 0, sizeof kp);
     }
     last_rc = r; last_status = st;
+}
+
+/* ---- 更新の仕組み(EB0)の書き換え ---- */
+static int getc_wait(uint32_t t) {
+    uint32_t s = now_ms();
+    int c;
+    while ((c = getc_now()) < 0) if (now_ms() - s >= t) return -1;
+    return c;
+}
+
+static void do_loader(void) {
+    uint8_t *buf = (uint8_t *)body, h[8];
+    uint32_t len, crc, i, n;
+    uint8_t r;
+    put_text("ready\r\n");
+    for (i = 0; i < 8; i++) { int c = getc_wait(3000); if (c < 0) { put_text("timeout"); return; } h[i] = (uint8_t)c; }
+    len = ((uint32_t)h[0] << 24) | ((uint32_t)h[1] << 16) | ((uint32_t)h[2] << 8) | h[3];
+    crc = ((uint32_t)h[4] << 24) | ((uint32_t)h[5] << 16) | ((uint32_t)h[6] << 8) | h[7];
+    n = (len + 127) & ~127UL;
+    if (len < 0x104 || n > 0x1000 || n > sizeof body) { put_text("bad-length"); return; }
+    for (i = 0; i < len; i++) { int c = getc_wait(3000); if (c < 0) { put_text("timeout"); return; } buf[i] = (uint8_t)c; }
+    if (oldp_crc32(buf, len) != crc) { put_text("bad-crc"); return; }
+    /* リセットのベクタが起動の入口(0x100)を指していなければ、更新の仕組みではない */
+    if (buf[0] || buf[1] || buf[2] != 0x01 || buf[3]) { put_text("not-loader"); return; }
+    memset(buf + len, 0xff, n - len);
+    r = store_block_safe(buf, 0, 0, (uint16_t)(n / 128));
+    if (r) { put_text("store-failed "); put_dec(r); return; }
+    put_text(oldp_crc32(flash_at(0), len) == crc ? "ok" : "verify-failed");
 }
 
 static int get_line(char *buf, int cap) {
@@ -438,6 +578,7 @@ static void put_log(void) {
         put_text(" bad="); put_dec(got.bad_trace); put_text(" ignored="); put_text(got.ignored); put_text(" rejected="); put_text(got.rejected);
     }
     put_text(" fail="); put_dec(dev.last_fail); put_text(" host="); put_text(dev.peer_fp);
+    if (!via_lan) { put_text(" resent="); put_dec(dev.link.resent); put_text(" bad_units="); put_dec(dev.link.bad_units); put_text(" sci_err="); put_dec(sci_err); put_text(" rxq_lost="); put_dec(rxq_lost); put_text(" irq="); put_dec(irq_on); }
 }
 
 int main(void) {
@@ -445,6 +586,8 @@ int main(void) {
     uint8_t i;
     board_init();
     hosts_load();
+    irq_init();
+    if (brr_now() != BRR_DEFAULT) set_brr(brr_now());
     keys_load();
     caps_build();
     if (page.net.set == 1) net_up(&page.net);
@@ -475,7 +618,7 @@ int main(void) {
         else if (starts(line, "rekey ")) { begin(line); do_rekey(); end_session(); }
         else if (!memcmp(line, "keyreset", 9)) {
             memset(&kp, 0, sizeof kp);
-            put_text(store_page((const uint8_t *)&kp, KEY_ADDR, KEY_BLOCK) ? "store-failed" : "ok");
+            put_text(store_safe((const uint8_t *)&kp, KEY_ADDR, KEY_BLOCK) ? "store-failed" : "ok");
             keys_load();
         }
         else if (!memcmp(line, "lan", 4)) {
@@ -485,6 +628,19 @@ int main(void) {
             put_text(" retrans="); put_dec((int32_t)net_stats.retrans); put_text(" badsum="); put_dec((int32_t)net_stats.bad_csum);
             put_text(" over="); put_dec((int32_t)net_stats.overflow); put_text(" last="); put_dec(last_net); put_text(" err="); put_dec(net_last_error());
             put_text(" via="); put_text(via_lan ? "lan" : "uart");
+        }
+        else if (!memcmp(line, "baud", 5)) { put_text("baud="); put_dec((int32_t)bps_of(brr_now())); put_text(" irq="); put_dec(irq_on); }
+        else if (!memcmp(line, "loader", 7)) do_loader();
+        else if (starts(line, "baud ")) {
+            uint32_t v = to_u(line + 5);
+            uint8_t i, b = 0;
+            for (i = 0; i < sizeof BAUDS / sizeof BAUDS[0]; i++) if (BAUDS[i].bps == v) b = BAUDS[i].brr;
+            if (!b) put_text("?");
+            else {
+                if (b != brr_now()) { page.brr = b == BRR_DEFAULT ? 0xff : b; hosts_save(); }
+                put_text(v == 115200 ? "ok out-of-range" : "ok");
+                set_brr(b);
+            }
         }
         else if (!memcmp(line, "via lan", 8)) { via_lan = 1; put_text("ok"); }
         else if (!memcmp(line, "via uart", 9)) { via_lan = 0; put_text("ok"); }
@@ -515,10 +671,15 @@ int main(void) {
             oldp_x25519_base(b, a);
             put_text("bench-end");
         } else if (!memcmp(line, "reset", 6)) {
+            __asm__ volatile ("orc #0x80,ccr");
             ((void (*)(void))0x100)();
         } else if (!memcmp(line, "update", 7)) {
-            /* 更新の仕組みに「すぐ更新の待ちに入る」の印を渡して飛ぶ。割り込みは使っていない */
+            /* 更新の仕組みに「すぐ更新の待ちに入る」の印を渡し、割り込みを止めて飛ぶ */
             *(volatile uint32_t *)0xffff10 = 0x55504454UL;
+            /* 更新の仕組みは 9600 bps で動く。PC が速度を合わせ直す間を置く */
+            while (!(SCI1_SSR & SSR_TEND)) now_ms();
+            wait_ms(200);
+            __asm__ volatile ("orc #0x80,ccr");
             ((void (*)(void))0x100)();
         } else if (!memcmp(line, "log", 4)) put_log();
         else put_text("?");

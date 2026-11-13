@@ -9,6 +9,10 @@
   bench:    基板が "bench-start" と "bench-end" を返すあいだの時間(X25519 の 1 回分)を測る。
   -Lan:     put・get・ops・wait を基板の LAN で行う。基板がホストへ直接 TCP でつなぐので、中継も -Hub も要らない
             (基板の ip コマンドでホストのアドレスとポートを設定しておく)。線は結果の表示にだけ使う。
+  baud <速度>: 基板の線の速度を変える(フラッシュに残る)。基板が今の速度で "ok" を返したら、こちらも新しい速度に切り替え、
+            基板が応えるかを確かめる。-BaudRate には、基板の今の速度を渡す。
+  -BaudRate: 基板の線の速度(既定は 9600)。基板の baud コマンドで変えたときは、同じ値を渡す。
+            -PcBaudRate を渡すと、PC の側だけその速度にする(規格の一覧にない速度を試すため)。
   そのほか(id・log)は、返事をそのまま表示する。
 
 .EXAMPLE
@@ -16,10 +20,13 @@
   pwsh -File tools/h8-session.ps1 -Port COM11 -Command bench
   pwsh -File tools/h8-session.ps1 -Port COM11 -Command 'put H8-T1' -Hub 127.0.0.1:33520 -Pair
   pwsh -File tools/h8-session.ps1 -Port COM11 -Command 'get H8-E1' -Hub 127.0.0.1:33520
+  pwsh -File tools/h8-session.ps1 -Port COM11 -Command 'baud 57600'
+  pwsh -File tools/h8-session.ps1 -Port COM11 -BaudRate 57600 -Command 'get H8-E1' -Hub 127.0.0.1:33520
 #>
 param(
     [string]$Port = 'COM11',
     [int]$BaudRate = 9600,
+    [int]$PcBaudRate = 0,
     [Parameter(Mandatory)][string]$Command,
     [string]$Hub,
     [switch]$Pair,
@@ -40,7 +47,7 @@ function Read-Until($Serial, [string]$Text, [int]$Seconds) {
     throw "基板から「$Text」が届きません(届いたもの: $($sb.ToString()))"
 }
 
-$serial = [System.IO.Ports.SerialPort]::new($Port, $BaudRate, 'None', 8, 'One')
+$serial = [System.IO.Ports.SerialPort]::new($Port, $(if ($PcBaudRate) { $PcBaudRate } else { $BaudRate }), 'None', 8, 'One')
 $serial.Open()
 try {
     $serial.DiscardInBuffer()
@@ -55,6 +62,21 @@ try {
         $t0 = Get-Date
         [void](Read-Until $serial 'bench-end' $TimeoutSeconds)
         Write-Host ('X25519 の 1 回(公開鍵を求める計算): {0:F1} 秒' -f ((Get-Date) - $t0).TotalSeconds)
+        return
+    }
+    if ($Command -match '^baud (\d+)$') {
+        $new = [int]$Matches[1]
+        $serial.Write("$Command`r")
+        $reply = Read-Until $serial 'ok' 5
+        # 基板は返事("ok" か "ok out-of-range")を今の速度で送り終えてから切り替え、入力待ちの表示は新しい速度で送る
+        Start-Sleep -Milliseconds 100
+        $reply += $serial.ReadExisting()
+        $serial.BaudRate = $new
+        Start-Sleep -Milliseconds 200
+        $serial.DiscardInBuffer()
+        $serial.Write("baud`r")
+        $now = (Read-Until $serial 'oldp> ' 5) -replace "`r`noldp> $", ''
+        Write-Host (($reply -replace '[^ -~]', '').Trim() + "`n" + $now.Trim())
         return
     }
     if ($Command -notmatch '^(put|get|ops|wait|rekey) ') {

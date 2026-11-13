@@ -1,9 +1,16 @@
 ; リセットの入口(フラッシュの 0x100)。プログラムを RAM へ写し、.bss を 0 にして main を呼ぶ。
 ; 本体の update コマンドも、ここへ飛んでくる。
 	.h8300h
+; 割り込みのベクタ。SCI1 の ERI1(56 番)・RXI1(57 番)は RAM の 0xffff00・0xffff04 へ飛ばし、そこへ本体が飛び先を書く。
+; 更新の仕組みは割り込みを使わない(入口で禁止する)。ほかの割り込みは使わないので、入口へ飛ばす
 	.section .vectors,"a"
 	.long	_start
-	.rept	63
+	.rept	55
+	.long	_start
+	.endr
+	.long	0xffff00
+	.long	0xffff04
+	.rept	6
 	.long	_start
 	.endr
 

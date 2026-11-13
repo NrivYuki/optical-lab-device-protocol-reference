@@ -13,14 +13,26 @@
 .EXAMPLE
   pwsh -File tools/h8-update.ps1 -Port COM11
   pwsh -File tools/h8-update.ps1 -Port COM11 -Recover
+  pwsh -File tools/h8-update.ps1 -Port COM11 -BaudRate 57600
+
+  -BaudRate: 本体の線の速度(本体の baud コマンドで変えたとき)。update コマンドと reset コマンドはこの速度で送り、
+             更新の仕組みとは 9600 bps で話す。
+  -Loader:   本体ではなく、更新の仕組み(c/h8/loader/loader.mot。フラッシュの EB0)を書き換える。動いている本体の loader コマンドが、
+             受けた中身で EB0 を消して書き、読み直して確かめる。書き終えたら reset コマンドで起動し直す。
+             書く間(1 秒ほど)に電源が切れると更新の仕組みが壊れる。そのときは、DIP スイッチをブートモードにして kz_h8write.ps1 で書き直す。
+
+  pwsh -File tools/h8-update.ps1 -Port COM11 -Loader
 #>
 param(
     [string]$Port = 'COM11',
     [string]$MotFile = (Join-Path $PSScriptRoot '..\c\h8\oldp-h8.mot'),
-    [switch]$Recover
+    [switch]$Recover,
+    [int]$BaudRate = 9600,
+    [switch]$Loader
 )
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+if ($Loader -and -not $PSBoundParameters.ContainsKey('MotFile')) { $MotFile = Join-Path $PSScriptRoot '..\c\h8\loader\loader.mot' }
 
 $APP_BASE = 0x1000
 $CRC_TABLE = [uint32[]]::new(256)
@@ -35,6 +47,53 @@ function Get-Crc32([byte[]]$Data, [int]$Offset, [int]$Count) {
     return [uint32]($c -bxor 0xFFFFFFFFu)
 }
 function ConvertTo-Be32([uint32]$V) { return [byte[]]@((($V -shr 24) -band 255), (($V -shr 16) -band 255), (($V -shr 8) -band 255), ($V -band 255)) }
+
+if ($Loader) {
+    # 更新の仕組みは 0 番地から(ベクタ表・起動の入口・RAM へ写すプログラム)。EB0(4 KB)に収まること
+    $img = [byte[]]::new(0x1000)
+    [Array]::Fill($img, [byte]0xFF)
+    $top = 0
+    foreach ($line in Get-Content -LiteralPath $MotFile) {
+        if ($line -notmatch '^S[12]') { continue }
+        $ab = if ($line[1] -eq '1') { 2 } else { 3 }
+        $count = [Convert]::ToInt32($line.Substring(2, 2), 16)
+        $addr = [Convert]::ToInt32($line.Substring(4, $ab * 2), 16)
+        $hex = $line.Substring(4 + $ab * 2, ($count - $ab - 1) * 2)
+        if ($addr + $hex.Length / 2 -gt 0x1000) { throw "EB0(0x0000-0x0FFF)の外のデータがあります: 0x$('{0:X}' -f $addr)" }
+        for ($i = 0; $i -lt $hex.Length; $i += 2) { $img[$addr + $i / 2] = [Convert]::ToByte($hex.Substring($i, 2), 16) }
+        $top = [Math]::Max($top, $addr + $hex.Length / 2)
+    }
+    $len = [int]$top
+    $crc = Get-Crc32 $img 0 $len
+    Write-Host ('更新の仕組み: {0} バイト、CRC-32 0x{1:X8}' -f $len, $crc)
+    $sp = [System.IO.Ports.SerialPort]::new($Port, $BaudRate, 'None', 8, 'One')
+    $sp.Open()
+    try {
+        $sp.DiscardInBuffer()
+        $sp.ReadTimeout = 100
+        function Read-To([string]$Text, [int]$Seconds) {
+            $sb = [Text.StringBuilder]::new(); $end = (Get-Date).AddSeconds($Seconds)
+            while ((Get-Date) -lt $end) {
+                try { [void]$sb.Append([char]$sp.ReadByte()) } catch [TimeoutException] { continue }
+                if ($sb.ToString().EndsWith($Text)) { return $sb.ToString() }
+            }
+            throw "基板から「$Text」が届きません(届いたもの: $($sb.ToString()))"
+        }
+        $sp.Write("`rloader`r")
+        [void](Read-To "ready`r`n" 5)
+        $head = [byte[]]((ConvertTo-Be32 ([uint32]$len)) + (ConvertTo-Be32 $crc))
+        $sp.Write($head, 0, 8)
+        $sp.Write($img, 0, $len)
+        $reply = (Read-To 'oldp> ' 30) -replace "`r`noldp> $", ''
+        Write-Host "基板: $($reply.Trim())"
+        if ($reply.Trim() -ne 'ok') { throw '更新の仕組みを書き換えられませんでした' }
+        $sp.Write("reset`r")
+        $banner = Read-To 'oldp> ' 10
+        $sp.Write("baud`r")
+        Write-Host ((Read-To 'oldp> ' 5) -replace "`r`noldp> $", '').Trim()
+    } finally { $sp.Close() }
+    return
+}
 
 # ---- S レコードを読み、本体の範囲を 1 枚の並びにする(すき間は 0xFF) ----
 $records = foreach ($line in Get-Content -LiteralPath $MotFile) {
@@ -59,7 +118,7 @@ foreach ($r in $records) {
 $imageCrc = Get-Crc32 $image 0 $len
 Write-Host ('本体: {0} バイト、CRC-32 0x{1:X8}' -f $len, $imageCrc)
 
-$serial = [System.IO.Ports.SerialPort]::new($Port, 9600, 'None', 8, 'One')
+$serial = [System.IO.Ports.SerialPort]::new($Port, $BaudRate, 'None', 8, 'One')
 $serial.Open()
 
 function Read-Until([string]$Text, [int]$Seconds) {
@@ -92,6 +151,9 @@ try {
     if ($Recover) {
         # 本体が動いていれば reset コマンドで起動の入口へ戻る。動いていなければ、リセットボタンを押す
         $serial.Write("`rreset`r")
+        while ($serial.BytesToWrite -gt 0) { Start-Sleep -Milliseconds 5 }
+        Start-Sleep -Milliseconds 20
+        $serial.BaudRate = 9600
         Write-Host '起動の入口へ戻しました。応えなければ基板のリセットボタンを押してください(合図を送り続けます)'
         $until = (Get-Date).AddSeconds(60)
         $sb = [Text.StringBuilder]::new()
@@ -104,6 +166,10 @@ try {
         }
     } else {
         $serial.Write("update`r")
+        # 本体は送り終えてから 200 ms 待って更新の仕組みへ移る。その間に 9600 bps に合わせる
+        while ($serial.BytesToWrite -gt 0) { Start-Sleep -Milliseconds 5 }
+        Start-Sleep -Milliseconds 20
+        $serial.BaudRate = 9600
         [void](Read-Until "LOAD`r`n" 5)
     }
     Write-Host '更新の仕組みに移りました。消去します'

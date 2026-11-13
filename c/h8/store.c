@@ -32,7 +32,7 @@ static RAMFN uint8_t prepare(uint8_t erase) {
     return store_call(FPEFEQ_20MHZ, 0, DLTOP + 32) ? 0x20 : 0;
 }
 
-RAMFN uint8_t store_page(const uint8_t *page, uint32_t addr, uint8_t block) {
+RAMFN uint8_t store_block(const uint8_t *data, uint32_t addr, uint8_t block, uint16_t pages) {
     uint8_t r;
     if (!(FCCS & FCCS_FWE)) return 1;
     if ((r = prepare(1))) return r;
@@ -41,8 +41,15 @@ RAMFN uint8_t store_page(const uint8_t *page, uint32_t addr, uint8_t block) {
     FKEY = 0;
     if (r) return 0x40;
     if ((r = prepare(0))) return r;
-    FKEY = 0x5a;
-    r = store_call((uint32_t)page, addr, DLTOP + 16);
-    FKEY = 0;
-    return r ? 0x80 : 0;
+    while (pages--) {
+        FKEY = 0x5a;
+        r = store_call((uint32_t)data, addr, DLTOP + 16);
+        FKEY = 0;
+        if (r) return 0x80;
+        data += 128;
+        addr += 128;
+    }
+    return 0;
 }
+
+RAMFN uint8_t store_page(const uint8_t *page, uint32_t addr, uint8_t block) { return store_block(page, addr, block, 1); }

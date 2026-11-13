@@ -45,6 +45,7 @@ typedef struct {
     uint8_t retries;               /* UART: 再送の回数 */
     uint8_t tx_seq, rx_last, rx_any;
     uint32_t rx_crc, unit_crc;     /* UART: 最後に受けたフレームの CRC と、いま読んだ 1 つの CRC(同じ番号でも中身が違えば新しいフレーム) */
+    uint16_t resent, bad_units;    /* UART: 再送した回数と、COBS か CRC-32 で捨てた数(線の状態を調べるため) */
     uint8_t has_pend;              /* UART: ACK を待つ間に受けたフレーム */
     size_t pend_len;
     uint8_t pend[OLDP_FRAME_MAX];

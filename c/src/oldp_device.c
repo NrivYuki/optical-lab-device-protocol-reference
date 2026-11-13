@@ -58,9 +58,9 @@ static int uart_read_unit(oldp_link *l, uint8_t *kind, uint8_t *seq, size_t *ble
             size_t n = oldp_cobs_decode(l->raw, len, l->unit, sizeof l->unit);
             uint32_t crc;
             len = 0;
-            if (n == (size_t)-1 || n < 6) continue;
+            if (n == (size_t)-1 || n < 6) { l->bad_units++; continue; }
             crc = ((uint32_t)l->unit[n - 4] << 24) | ((uint32_t)l->unit[n - 3] << 16) | ((uint32_t)l->unit[n - 2] << 8) | l->unit[n - 1];
-            if (oldp_crc32(l->unit, n - 4) != crc) continue;
+            if (oldp_crc32(l->unit, n - 4) != crc) { l->bad_units++; continue; }
             l->unit_crc = crc;
             *kind = l->unit[0]; *seq = l->unit[1]; *blen = n - 6;
             return OLDP_OK;
@@ -106,6 +106,7 @@ int oldp_link_send(oldp_link *l, const uint8_t *frame, size_t n) {
     for (attempt = 0; attempt <= l->retries; attempt++) {
         int r = uart_write_unit(l, 0, l->tx_seq, frame, n);
         if (r) return r;
+        if (attempt) l->resent++;
         for (;;) {
             uint8_t kind, seq;
             size_t blen;
