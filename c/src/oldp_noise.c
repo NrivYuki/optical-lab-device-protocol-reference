@@ -17,7 +17,7 @@ static void nonce_of(uint64_t n, uint8_t out[12]) {
 int oldp_cipher_encrypt(oldp_cipher *c, const uint8_t *ad, size_t adlen, const uint8_t *pt, size_t len, uint8_t *out, size_t *out_len) {
     crypto_aead_ctx a;
     uint8_t nonce[12];
-    if (!c->has_key) { memmove(out, pt, len); *out_len = len; return 0; }
+    if (!c->has_key) { if (len) memmove(out, pt, len); *out_len = len; return 0; }
     if (c->n == UINT64_MAX) return -1;
     nonce_of(c->n, nonce);
     crypto_aead_init_ietf(&a, c->k, nonce);
@@ -32,7 +32,7 @@ int oldp_cipher_decrypt(oldp_cipher *c, const uint8_t *ad, size_t adlen, const u
     crypto_aead_ctx a;
     uint8_t nonce[12];
     int bad;
-    if (!c->has_key) { memmove(out, ct, len); *out_len = len; return 0; }
+    if (!c->has_key) { if (len) memmove(out, ct, len); *out_len = len; return 0; }
     if (len < OLDP_TAGLEN || c->n == UINT64_MAX) return -1;
     nonce_of(c->n, nonce);
     crypto_aead_init_ietf(&a, c->k, nonce);

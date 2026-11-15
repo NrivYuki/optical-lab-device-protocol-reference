@@ -410,7 +410,7 @@ int oldp_dev_poll(oldp_dev *d, uint32_t timeout_ms) {
     if (!d->ready) return OLDP_E_PROTOCOL;
     if ((r = recv_message(d, &n, timeout_ms))) return r;
     if (d->plain[3] & OLDP_RESPONSE) return OLDP_OK;               /* 待っていない応答は捨てる */
-    return handle_request(d, n, (uint16_t)((d->plain[1] << 8) | d->plain[2]), d->plain[3]);
+    return handle_request(d, n, (uint16_t)(((unsigned)d->plain[1] << 8) | d->plain[2]), d->plain[3]);
 }
 
 int oldp_dev_request(oldp_dev *d, uint8_t op, const char *body, size_t len, oldp_line_fn on_line, void *ctx, uint8_t *resp_op, int *status) {
@@ -426,7 +426,7 @@ int oldp_dev_request(oldp_dev *d, uint8_t op, const char *body, size_t len, oldp
         uint16_t id;
         uint8_t flags;
         if ((r = recv_message(d, &n, d->timeout_ms))) return r;
-        id = (uint16_t)((d->plain[1] << 8) | d->plain[2]);
+        id = (uint16_t)(((unsigned)d->plain[1] << 8) | d->plain[2]);
         flags = d->plain[3];
         if (!(flags & OLDP_RESPONSE)) {
             if ((r = handle_request(d, n, id, flags))) return r;
@@ -445,7 +445,8 @@ int oldp_dev_request(oldp_dev *d, uint8_t op, const char *body, size_t len, oldp
                 if (status && ll > 7 && !memcmp(line, "STATUS=", 7)) {
                     int v = 0;
                     size_t k;
-                    for (k = 7; k < ll && line[k] >= '0' && line[k] <= '9'; k++) v = v * 10 + (line[k] - '0');
+                    /* 長い数字は 9999 で止める(int が 16 ビットの CPU でもあふれさせない) */
+                    for (k = 7; k < ll && line[k] >= '0' && line[k] <= '9'; k++) v = v < 1000 ? v * 10 + (line[k] - '0') : 9999;
                     *status = v;
                 }
                 if (on_line && on_line(ctx, line, ll)) stop = 1;

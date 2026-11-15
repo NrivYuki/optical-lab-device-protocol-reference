@@ -22,8 +22,13 @@ function keyPair(privateKey) {
   return { privateKey: Buffer.from(rawPriv), publicKey: Buffer.from(rawPub) };
 }
 
+/** X25519。結果が全て 0(相手の公開鍵が位数の小さい点)なら、ハンドシェイクの失敗として投げる(規格 6 章) */
 function dh(kp, publicKey) {
-  return crypto.diffieHellman({ privateKey: privKey(kp.privateKey), publicKey: pubKey(publicKey) });
+  let out;
+  // OpenSSL も結果が全て 0 のときは計算を失敗にするが、その決まりに頼らず、ここで確かめる
+  try { out = crypto.diffieHellman({ privateKey: privKey(kp.privateKey), publicKey: pubKey(publicKey) }); } catch { out = Buffer.alloc(DHLEN); }
+  if (out.every(b => b === 0)) throw Object.assign(new Error('X25519 の結果が全て 0 です'), { code: 'handshake' });
+  return out;
 }
 
 // ---- ChaCha20-Poly1305(nonce は 32 ビットの 0 と、64 ビットの小さい順のシーケンス番号) ----

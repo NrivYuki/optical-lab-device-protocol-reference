@@ -23,6 +23,11 @@
  *   update         更新の仕組みへ移る。あとは PC の tools/h8-update.ps1 が本体を書き換える
  *   loader         更新の仕組み(EB0)を書き換える。"ready" を返したあと、長さ(4)・CRC-32(4)・中身を受け、EB0 を消して書き、
  *                  読み直して CRC-32 を比べる(PC の tools/h8-update.ps1 -Loader が使う)。書く間に電源が切れたら、ブートモードで書き直す
+ *   rngtrace <回数>  試験用の組み立て(make trace)だけ。乱数に混ぜる文字の到着の時刻を記録して返す(tools/h8-rngtrace.ps1)
+ *   rngboot <個数>   試験用の組み立てだけ。起動した直後からの到着の時刻を返す(再起動のテスト。tools/h8-rngtrace.ps1 -Restarts)
+ *   xtime <種類> <鍵>  試験用の組み立てだけ。秘密の値を使う計算の時間を、サイクルの単位で返す(tools/h8-xtime.js)
+ *   rngsess on|off・rngdump  試験用の組み立てだけ。実際のセッションの間に混ぜた値を記録して返す(tools/h8-rngsession.js)
+ *   rnglan <回数>    試験用の組み立てだけ。LAN で受けたパケットで混ぜる値を記録して返す(tools/h8-rnglan.js)
  * put・get・ops・wait は "start" を返したあと、via uart では同じ線を UART のトランスポートとして使い(via lan なら線は結果の表示にだけ使う)、終わると少し待ってから
  * "OLDP-END <戻り値> <STATUS>" を返す(PC の中継は、これを見てホストとの間を切る)。
  * 乱数: 機器ごとの秘密の種(devkey.h)に、受け取った文字の到着の時刻を SHA-256 で混ぜて使う(規格 2 章)。
@@ -66,8 +71,22 @@ static uint32_t rng_count;
 static uint8_t ent[64];
 static uint8_t ent_i;
 
+#ifdef OLDP_RNG_TRACE
+/* 試験用の組み立て(make trace)だけ: stir が受けた TCNT0 の下位 8 ビットを記録する。変数の領域に空きがないので、
+ * 内蔵の書き込みプログラムの取り出し先(0xffdf20 から)を使う。rngtrace の間はフラッシュに書かないので重ならない。
+ * スタック(0xffff00 から下へ)とは 4 KB 離れている */
+#define TR_MAX 4096
+#define TR_BUF ((volatile uint8_t *)0xffdf20UL)
+#define TR_N   (*(volatile uint16_t *)0xffef20UL)   /* 記録した数。TR_MAX より大きいときは記録しない */
+#define TR_FIRST (*(volatile uint16_t *)0xffef22UL) /* 起動してから最初に受けた文字の TCNT0(16 ビット) */
+#define TR_SESS  (*(volatile uint8_t *)0xffef24UL)  /* 1 なら、セッションを始めるたびに記録を空にする(rngsess) */
+#endif
+
 void stir(uint8_t c) {
     unsigned short t = TCNT0;
+#ifdef OLDP_RNG_TRACE
+    { uint16_t n = TR_N; if (n < TR_MAX) { if (!n) TR_FIRST = t; TR_BUF[n] = (uint8_t)t; TR_N = (uint16_t)(n + 1); } }
+#endif
     ent[ent_i & 63] ^= (uint8_t)(c ^ (uint8_t)t);
     ent[(ent_i + 1) & 63] ^= (uint8_t)(t >> 8);
     ent_i = (uint8_t)(ent_i + 2);
@@ -553,7 +572,13 @@ static int parse_ip(const char **ps, uint8_t ip[4]) {
     return 1;
 }
 
-static void begin(const char *line) { memcpy(last_cmd, line, 4); last_cmd[4] = 0; if (last_cmd[3] == ' ') last_cmd[3] = 0; put_text("start\r\n"); }
+static void begin(const char *line) {
+    memcpy(last_cmd, line, 4); last_cmd[4] = 0; if (last_cmd[3] == ' ') last_cmd[3] = 0;
+#ifdef OLDP_RNG_TRACE
+    if (TR_SESS == 1) TR_N = 0;   /* rngsess on: このセッションの間に混ぜた値を記録する */
+#endif
+    put_text("start\r\n");
+}
 
 static void end_session(void) {
     pairing = 0;
@@ -562,6 +587,123 @@ static void end_session(void) {
     if (dirty) hosts_save();
     put_text("\r\nOLDP-END "); put_dec(last_rc); put_text(" "); put_dec(last_status);
 }
+
+#ifdef OLDP_RNG_TRACE
+/* rngtrace <回数>: PC が送る文字の並び(0x00 で区切る)を受け、区切りごとに 'A' を返す。記録が TR_MAX に達したら、
+ * 'A' の代わりに 'D' と記録(TR_MAX バイト)を返す。これを <回数> だけ繰り返す(PC の tools/h8-rngtrace.ps1 が使う) */
+static void do_rngtrace(uint32_t blocks) {
+    uint16_t i;
+    put_text("ready\r\n");
+    TR_N = 0;
+    while (blocks) {
+        int c = getc_now();
+        if (c < 0) { now_ms(); continue; }
+        if (c) continue;
+        if (TR_N < TR_MAX) { putc_wait('A'); continue; }
+        TR_N = 0xffff;
+        putc_wait('D');
+        for (i = 0; i < TR_MAX; i++) putc_wait(TR_BUF[i]);
+        if (--blocks) TR_N = 0;
+    }
+}
+
+/* xtime <x25519|aead|hmac> <16 進の鍵 32 バイト>: 割り込みを止めて、秘密の値を使う計算を 1 回行い、かかった時間を
+ * TCNT0 の数(φ/8 = 8 サイクルごと。65536 で一回りするので、26.2 ms で割った余り)で返す。
+ * 計算の手順が値によって変わらなければ、どの鍵でも同じ数になる(この CPU にはキャッシュも分岐の予測もない)。
+ *   x25519: 鍵を秘密の値として公開鍵を求める。aead: 鍵で 64 バイトを ChaCha20-Poly1305 で暗号化する。hmac: 鍵で 64 バイトの HMAC-SHA-256。
+ *   aeadlong: 鍵で 480 バイトを ChaCha20-Poly1305 で暗号化する(Poly1305 の掛け算を増やし、小さな差を大きくして見るため) */
+static void do_xtime(const char *arg) {
+    uint8_t k[32], out[496], msg[480];
+    const char *h = arg;
+    uint16_t t0, t1, i;
+    int kind = !memcmp(arg, "x25519 ", 7) ? 0 : !memcmp(arg, "aead ", 5) ? 1 : !memcmp(arg, "hmac ", 5) ? 2 : !memcmp(arg, "aeadlong ", 9) ? 3 : -1;
+    if (kind < 0) { put_text("?"); return; }
+    while (*h && *h != ' ') h++;
+    h++;
+    for (i = 0; i < 32; i++) {
+        uint8_t v = 0, j;
+        for (j = 0; j < 2; j++) {
+            char c = *h++;
+            v = (uint8_t)(v << 4 | (c >= 'a' ? c - 'a' + 10 : c >= 'A' ? c - 'A' + 10 : c - '0'));
+        }
+        k[i] = v;
+    }
+    for (i = 0; i < sizeof msg; i++) msg[i] = (uint8_t)i;
+    __asm__ volatile ("orc #0x80,ccr");
+    t0 = TCNT0;
+    if (kind == 0) oldp_x25519_base(out, k);
+    else if (kind == 1 || kind == 3) {
+        oldp_cipher c;
+        size_t n;
+        memcpy(c.k, k, 32); c.has_key = 1; c.n = 0;
+        oldp_cipher_encrypt(&c, msg, 2, msg, kind == 1 ? 64 : sizeof msg, out, &n);
+    } else {
+        oldp_hmac_ctx m;
+        oldp_hmac_init(&m, k, 32); oldp_hmac_update(&m, msg, 64); oldp_hmac_final(&m, out);
+    }
+    t1 = TCNT0;
+    if (irq_on) __asm__ volatile ("andc #0x7f,ccr");
+    put_text("ticks="); put_dec((uint16_t)(t1 - t0));
+}
+
+/* rngsess on|off: on のあいだは、セッションを始めるたびに記録を空にして、セッションの間に混ぜた値を記録する。
+ * rngdump: 記録した数(2 バイト、上位から)と記録を、'D' に続けて返し、記録を止める(PC の tools/h8-rngsession.js が使う) */
+static void do_rngdump(void) {
+    uint16_t i, n = TR_N > TR_MAX ? TR_MAX : TR_N;
+    if (TR_N == 0xffff) n = 0;
+    TR_N = 0xffff;
+    putc_wait('D'); putc_wait((uint8_t)(n >> 8)); putc_wait((uint8_t)n);
+    for (i = 0; i < n; i++) putc_wait(TR_BUF[i]);
+}
+
+/* rnglan <回数>: LAN で受けたパケットで混ぜる値を記録する。PC がこの基板へパケットを送り続ける間、受けて混ぜ、
+ * 記録が TR_MAX に達するたびに 'D' と記録を返す。<回数> だけ繰り返す(PC の tools/h8-rnglan.js が使う) */
+static void do_rnglan(uint32_t blocks) {
+    uint16_t i;
+    if (!net_is_up()) { put_text("no-lan"); return; }
+    put_text("ready\r\n");
+    TR_N = 0;
+    while (blocks) {
+        net_poll();
+        if (TR_N < TR_MAX) continue;
+        TR_N = 0xffff;
+        putc_wait('D');
+        for (i = 0; i < TR_MAX; i++) putc_wait(TR_BUF[i]);
+        if (--blocks) TR_N = 0;
+    }
+}
+
+/* rngboot <個数>: 起動してから記録した値を、<個数> になるまで rngtrace と同じ形で受け続け、'D'、最初の文字の TCNT0(2 バイト、
+ * 上位から)、記録の先頭の <個数> バイトを返す(SP 800-90B の再起動のテスト。PC の tools/h8-rngtrace.ps1 -Restarts が使う) */
+static void do_rngboot(uint32_t n) {
+    uint16_t i, f;
+    if (n < 1 || n > TR_MAX) { put_text("?"); return; }
+    put_text("ready\r\n");
+    for (;;) {
+        int c = getc_now();
+        if (c < 0) { now_ms(); continue; }
+        if (c) continue;
+        if (TR_N < n) { putc_wait('A'); continue; }
+        TR_N = 0xffff;
+        f = TR_FIRST;
+        putc_wait('D'); putc_wait((uint8_t)(f >> 8)); putc_wait((uint8_t)f);
+        for (i = 0; i < n; i++) putc_wait(TR_BUF[i]);
+        return;
+    }
+}
+#endif
+
+#ifdef OLDP_UBSAN
+/* 未定義の動作を確かめる組み立て(make ubsan)だけ。-fsanitize=undefined -fsanitize-trap=undefined で組み立てると、
+ * 未定義の動作の手前で abort を呼ぶ。呼んだ場所の番地を返して止まる(tools/h8-ubsan.js が番地をソースの行に直す) */
+void abort(void) {
+    uint32_t a = (uint32_t)__builtin_return_address(0);
+    uint8_t b[4];
+    __asm__ volatile ("orc #0x80,ccr");
+    b[0] = (uint8_t)(a >> 24); b[1] = (uint8_t)(a >> 16); b[2] = (uint8_t)(a >> 8); b[3] = (uint8_t)a;
+    for (;;) { put_text("\r\nUBSAN-TRAP "); put_hex(b, 4); put_text("\r\n"); wait_ms(1000); }
+}
+#endif
 
 static void put_log(void) {
     put_text(last_cmd); put_text(" rc="); put_dec(last_rc); put_text(" status="); put_dec(last_status);
@@ -584,6 +726,9 @@ static void put_log(void) {
 int main(void) {
     static char line[80];
     uint8_t i;
+#ifdef OLDP_RNG_TRACE
+    TR_N = 0;   /* 起動した直後から記録する(rngboot。rngtrace は数え直す) */
+#endif
     board_init();
     hosts_load();
     irq_init();
@@ -591,7 +736,13 @@ int main(void) {
     keys_load();
     caps_build();
     if (page.net.set == 1) net_up(&page.net);
+#if defined(OLDP_UBSAN)
+    put_text("\r\noldp-h8 1.0 ubsan ");
+#elif defined(OLDP_RNG_TRACE)
+    put_text("\r\noldp-h8 1.0 rngtrace ");
+#else
     put_text("\r\noldp-h8 1.0 ");
+#endif
     put_text(my_fp);
     put_text("\r\noldp> ");
     for (;;) {
@@ -682,6 +833,15 @@ int main(void) {
             __asm__ volatile ("orc #0x80,ccr");
             ((void (*)(void))0x100)();
         } else if (!memcmp(line, "log", 4)) put_log();
+#ifdef OLDP_RNG_TRACE
+        else if (starts(line, "rngtrace ")) do_rngtrace(to_u(line + 9));
+        else if (starts(line, "rngboot ")) do_rngboot(to_u(line + 8));
+        else if (starts(line, "xtime ")) do_xtime(line + 6);
+        else if (!memcmp(line, "rngsess on", 11)) { TR_SESS = 1; TR_N = 0xffff; put_text("ok"); }
+        else if (!memcmp(line, "rngsess off", 12)) { TR_SESS = 0; TR_N = 0xffff; put_text("ok"); }
+        else if (!memcmp(line, "rngdump", 8)) do_rngdump();
+        else if (starts(line, "rnglan ")) do_rnglan(to_u(line + 7));
+#endif
         else put_text("?");
         put_text("\r\noldp> ");
     }

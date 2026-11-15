@@ -55,6 +55,11 @@ static void fe_copy(fe r, const fe a) { uint8_t i; for (i = 0; i < 16; i++) r[i]
 static void fe_cswap(fe a, fe b, uint16_t bit) {
     uint16_t mask = (uint16_t)(0u - bit), x;
     uint8_t i;
+#if defined(__GNUC__)
+    /* mask が 0 か 0xffff だけだと分かると、gcc(H8/300H の 16.2.0)は入れ替えを bit による分岐に変える。
+     * 分岐は秘密の値で処理時間を変えるので、値を asm で隠す */
+    __asm__ ("" : "+r" (mask));
+#endif
     for (i = 0; i < 16; i++) { x = (uint16_t)((a[i] ^ b[i]) & mask); a[i] ^= x; b[i] ^= x; }
 }
 

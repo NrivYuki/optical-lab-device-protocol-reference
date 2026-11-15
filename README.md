@@ -15,6 +15,13 @@ OLDP(Optical Lab Device Protocol)第 1.0 版の参照実装である。機器の
 | `tools/sim-device.js` | PC で動く模擬機器(トレーサー・加工機。JavaScript) |
 | `tools/bridge.js` | 2 つの TCP の接続をつなぐ中継(WSL の C の模擬機器と、Windows のホストをつなぐため) |
 | `tools/import-spec.js` | 規格のリポジトリの `spec/` を写し直し、C の表を作り直す |
+| `tools/h8-ephemeral.js` | H8 の基板を起動し直すたびに、ハンドシェイクの一時鍵が変わるかを確かめる |
+| `tools/h8-rngtrace.ps1` | H8 の基板の試験用の組み立てから、乱数に混ぜる文字の到着の時刻を集める |
+| `tools/rng-estimate.c` | 集めた値の最小エントロピーを、NIST SP 800-90B の 6.3 節の方法で見積もる(3.1.4 の再起動のテストも) |
+| `tools/crosscheck.py` | 機器の側の C の暗号の部品を、OpenSSL(pyca/cryptography)の結果と比べる |
+| `tools/h8-xtime.js` | H8 の基板の試験用の組み立てで、秘密の値を使う計算の時間が値によって変わらないかを確かめる |
+| `tools/h8-ubsan.js` | 未定義の動作の手前で止まる H8 の組み立てを、ペアリングしたホストの代わりになって、形の崩れたメッセージで叩く |
+| `tools/h8-rngsession.js` | H8 の基板の試験用の組み立てから、実際のセッションの間に混ぜる値を集める |
 | `samples/` | 見本のジョブ。`tools/gen-samples.js` が計算で作る(角を丸めた楕円の玉型) |
 | `third_party/` | 外部から取り込んだもの。Monocypher 4.0.3(機器の側の C の暗号の部品。BSD 2 条項か CC0) |
 
@@ -45,6 +52,19 @@ C(WSL の gcc で組み立てる。`c/Makefile`):
 cd c
 make test
 ```
+
+機器の側の C の実装は、次の 3 つでも確かめる(WSL の中で動かす)。`crosscheck.py` は Python の pyca/cryptography を使う。
+
+```
+make -C c crosscheck fuzz_device timing
+python3 tools/crosscheck.py c/crosscheck 50000
+c/fuzz_device 10000 1
+c/timing 20000 200000
+```
+
+- `crosscheck`: X25519・SHA-256・HMAC-SHA-256・ChaCha20-Poly1305(Noise の nonce の形)を、乱数の入力と境界の値(位数の小さい点、p 以上の u、nonce の上限など)で OpenSSL と比べる。書き換えた暗号文・タグ・付加データを受け入れないことも確かめる。
+- `fuzz_device`: AddressSanitizer と UndefinedBehaviorSanitizer を付けて組み立てる。ホストの代わりをする部分が、ハンドシェイクの前のフレーム、ペアリングしたホストのメッセージ(正しく暗号化した上で中身を崩したもの)、線の上のバイト列を、乱数で壊して機器へ渡す(`c/tests/fuzz_device.c` の先頭に詳しく書いた)。2 つ目の引数は乱数の種である。
+- `timing`: 決まった鍵と乱数の鍵で X25519・ChaCha20-Poly1305・HMAC-SHA-256 の処理時間を集め、Welch の t 検定で比べる(dudect の方法)。3 つ目の引数に `null` を付けると、両方の組を乱数の鍵にして、測り方が偽の差を出さないかを確かめる。
 
 ## 模擬機器
 
@@ -125,6 +145,29 @@ pwsh -File tools/h8-session.ps1 -Port COM3 -Command 'get H8-E1' -Hub 127.0.0.1:3
 - 内蔵の書き込みプログラムに渡すデータは、偶数番地に置く。奇数番地に置くと、1 バイトずれて書き込まれる(マニュアルには書かれていない)。RAM に写して動かす手順も、偶数番地に置く(`rom.ld`)。
 - SCI1 の受信は、割り込みで受けてリングバッファにためる。受信を読みに行く作りでは、フレームを処理する間(復号など)に届いた文字を取りこぼす(オーバーランエラー)。割り込みの飛び先の仕組みは [docs/h8-board.md](docs/h8-board.md) にある。
 - 変数は、内蔵の書き込みプログラムの取り出し先(0xFFDF20)より下に置く(`rom.ld` で確かめる)。残りは少なく、リングバッファの大きさ(`main.c` の `RXQ`)はこれで決めている。
+- 32 ビット・64 ビットの掛け算は、libgcc のものではなく `c/h8/ctmul.c` のものを使う。libgcc のものは値によって処理時間が変わり、Poly1305 が秘密の値で呼ぶためである。
+
+乱数に混ぜる値と、秘密の値を使う計算の時間を調べるときは、試験用の組み立て(`make -C c/h8 trace`。`rngtrace`・`rngboot`・`rngsess`・`rngdump`・`rnglan`・`xtime` のコマンドを加えた `oldp-h8-trace.mot`)を基板に書く。見積もりの道具は、WSL の gcc で組み立てて動かす。終わったら、製品用の組み立てに書き戻す。
+
+```
+pwsh -File tools/h8-update.ps1 -Port COM3 -MotFile c/h8/oldp-h8-trace.mot
+pwsh -File tools/h8-rngtrace.ps1 -Port COM3 -Blocks 245
+pwsh -File tools/h8-rngtrace.ps1 -Port COM3 -Restarts 1000 -OutFile tools/.h8-restart.bin
+node tools/h8-xtime.js COM3
+node tools/h8-rngsession.js COM3 1000000
+pwsh -File tools/h8-rngtrace.ps1 -Port COM3 -Lan -Blocks 245 -OutFile tools/.h8-rnglan.bin
+gcc -O2 -o rng-estimate tools/rng-estimate.c -lm
+./rng-estimate -d tools/.h8-rngtrace.bin
+./rng-estimate -r 0.378 tools/.h8-restart.bin
+pwsh -File tools/h8-update.ps1 -Port COM3
+```
+
+int が 16 ビットのこの CPU でだけ起きる未定義の動作を確かめるときは、未定義の動作の手前で番地を返して止まる組み立て(`make -C c/h8 ubsan` で `oldp-h8-ub.mot`)を書き、`tools/h8-ubsan.js` や vca-hub-extension の確かめの道具を流す。
+
+```
+pwsh -File tools/h8-update.ps1 -Port COM3 -MotFile c/h8/oldp-h8-ub.mot
+node tools/h8-ubsan.js COM3 60
+```
 
 ## 確かめた環境
 

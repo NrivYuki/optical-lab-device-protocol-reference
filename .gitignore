@@ -5,11 +5,26 @@ c/h8/devkey.h
 *.elf
 *.mot
 asm/
+asm-trace/
+asm-ub/
 c/sim_device
 c/test_vectors
 c/test_device
+c/crosscheck
+c/fuzz_device
+c/timing
 
 # 模擬機器の鍵と覚えたホスト
 tools/.sim-device/
 
 node_modules/
+
+# 起動し直しの一時鍵の記録(tools/h8-ephemeral.js)
+tools/.h8-ephemeral.json
+
+# 乱数に混ぜる文字の到着の時刻の記録(tools/h8-rngtrace.ps1)
+tools/.h8-rngtrace.bin
+tools/.h8-restart.bin
+tools/.h8-restart-first.bin
+tools/.h8-rngsession.bin
+tools/.h8-rnglan.bin

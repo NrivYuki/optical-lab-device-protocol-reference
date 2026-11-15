@@ -16,6 +16,7 @@ const MIN_FRAME = DEF.frame.minSize;
 const PROLOGUE = Buffer.from(DEF.noise.prologue, 'ascii');
 const TAG = 16;
 const MAX_BODY = DEF.message.maxBodySize;
+const PARTIAL_LIMIT = 2 * MAX_BODY;   // 組み立て途中のメッセージにためる量の、セッションごとの上限
 const MAJOR = DEF.version.split('.')[0];
 const fail = (code, message, extra) => Object.assign(new Error(message), { code }, extra);
 
@@ -67,7 +68,8 @@ class Session extends EventEmitter {
     this.closed = false;
     this.nextReq = 1;
     this.pending = new Map();   // reqId → { resolve, reject, timer, op }
-    this.partial = new Map();   // 'q:reqId' / 'r:reqId' → { op, chunks }
+    this.partial = new Map();   // 'q:reqId' / 'r:reqId' → { op, chunks, size, kept, over }
+    this.partialBytes = 0;      // 組み立て途中のメッセージにためているバイト数
     this.sendQueue = Promise.resolve();
     this.opened = new Promise((resolve, reject) => { this._open = resolve; this._fail = reject; });
     this.opened.catch(() => {});
@@ -95,7 +97,7 @@ class Session extends EventEmitter {
     const err = fail('restarted', '機器がセッションをやり直しました');
     for (const w of this.pending.values()) { clearTimeout(w.timer); w.reject(err); }
     this.pending.clear();
-    this.partial.clear();
+    this.clearParts();
     this.hs = new Handshake({ initiator: false, s: this.keys, prologue: PROLOGUE, e: this.fixedE });
     this.peer = null;
     this.ready = false;
@@ -136,13 +138,17 @@ class Session extends EventEmitter {
     if (f.type === TYPES.hs1 && this.role === 'host' && this.hs.step !== 0 && this.link.isUart) this.restart();
     if (f.type === TYPES.hs1 && this.role === 'host' && this.hs.step === 0) {
       if (!this.readHandshake(f.payload)) return;
-      return this.sendFrame(TYPES.hs2, this.hs.write(Buffer.from(R.format(this.caps), 'ascii')));
+      const hs2 = this.writeHandshake(Buffer.from(R.format(this.caps), 'ascii'));
+      if (!hs2) return;
+      return this.sendFrame(TYPES.hs2, hs2);
     }
     if (f.type === TYPES.hs2 && this.role === 'device' && this.hs.step === 1) {
       const plain = this.readHandshake(f.payload);
       if (!plain) return;
       if (!await this.admit(plain)) return;
-      await this.sendFrame(TYPES.hs3, this.hs.write(Buffer.from(R.format(this.caps), 'ascii')));
+      const hs3 = this.writeHandshake(Buffer.from(R.format(this.caps), 'ascii'));
+      if (!hs3) return;
+      await this.sendFrame(TYPES.hs3, hs3);
       // 機器は、ホストの「受け入れた」(リクエスト ID 0 の RESULT)を受けてから使い始める(規格 6 章)
       this.secured = true;
       return;
@@ -178,12 +184,14 @@ class Session extends EventEmitter {
   /** 前のセッションを続けたまま、新しいハンドシェイクを始める */
   async beginCandidate(payload) {
     const hs = new Handshake({ initiator: false, s: this.keys, prologue: PROLOGUE, e: this.fixedE });
-    try { hs.read(payload); } catch { return; }
+    let hs2;
+    // 読めない・計算できない(一時鍵が位数の小さい点など)ものは捨て、前のセッションを続ける(規格 4 章)
+    try { hs.read(payload); hs2 = hs.write(Buffer.from(R.format(this.caps), 'ascii')); } catch { return; }
     this.candidate = hs;
     clearTimeout(this.candidateTimer);
     this.candidateTimer = setTimeout(() => { this.candidate = null; }, this.handshakeTimeoutMs);
     if (this.candidateTimer.unref) this.candidateTimer.unref();
-    await this.sendFrame(TYPES.hs2, hs.write(Buffer.from(R.format(this.caps), 'ascii'))).catch(() => {});
+    await this.sendFrame(TYPES.hs2, hs2).catch(() => {});
   }
 
   /** 新しいハンドシェイクを終える。相手を受け入れたときだけ、前のセッションと入れ替える */
@@ -199,7 +207,7 @@ class Session extends EventEmitter {
     const err = fail('restarted', '機器がセッションをやり直しました');
     for (const w of this.pending.values()) { clearTimeout(w.timer); w.reject(err); }
     this.pending.clear();
-    this.partial.clear();
+    this.clearParts();
     this.hs = hs;
     this.peer = r.peer;
     this.nextReq = 1;
@@ -211,6 +219,11 @@ class Session extends EventEmitter {
   /** ハンドシェイクのメッセージを読む。解けなければ失敗のフレームを送って null を返す */
   readHandshake(payload) {
     try { return this.hs.read(payload); } catch { this.refuse(2); return null; }
+  }
+
+  /** ハンドシェイクのメッセージを書く。計算できなければ(X25519 の結果が全て 0 など)失敗のフレームを送って null を返す */
+  writeHandshake(payload) {
+    try { return this.hs.write(payload); } catch { this.refuse(2); return null; }
   }
 
   /** ハンドシェイクで知った相手の鍵を、バージョン・拡張・ペアリングで確かめる。よければ { peer }、断るなら { code, text } */
@@ -279,11 +292,16 @@ class Session extends EventEmitter {
     }
     const isResp = !!(flags & FLAG.response);
     const key = `${isResp ? 'r' : 'q'}:${reqId}`;
-    const part = this.partial.get(key) || { op, chunks: [], size: 0, over: false };
-    part.size += msg.length - HEADER;
-    if (part.size > MAX_BODY) { part.over = true; part.chunks = []; } else part.chunks.push(msg.subarray(HEADER));
+    const part = this.partial.get(key) || { op, chunks: [], size: 0, kept: 0, over: false };
+    const len = msg.length - HEADER;
+    part.size += len;
+    // 1 つのメッセージは MAX_BODY まで(規格 7 章)。組み立て途中のメッセージが多くのリクエスト ID にまたがっても、
+    // ためる量はセッションごとに PARTIAL_LIMIT までにする(超えた分のメッセージは、大きすぎるものとして扱う)
+    if (part.size > MAX_BODY || this.partialBytes + len > PARTIAL_LIMIT) this.dropPart(part);
+    if (!part.over) { part.chunks.push(msg.subarray(HEADER)); part.kept += len; this.partialBytes += len; }
     if (flags & FLAG.more) { this.partial.set(key, part); return; }
     this.partial.delete(key);
+    this.partialBytes -= part.kept;
     if (part.over) {
       if (!isResp) return this.respond(OPS.RESULT, reqId, [['STATUS', '5']]);
       const w = this.pending.get(reqId);
@@ -303,6 +321,20 @@ class Session extends EventEmitter {
       return w.resolve({ op, opName: OP_NAME[op] || op, records, status: statusOf(records) });
     }
     return this.handleRequest(op, reqId, records);
+  }
+
+  /** 組み立て途中のメッセージを、大きすぎるものとして捨てる(ためた分を返す) */
+  dropPart(part) {
+    this.partialBytes -= part.kept;
+    part.kept = 0;
+    part.chunks = [];
+    part.over = true;
+  }
+
+  /** 組み立て途中のメッセージを全て捨てる(閉じたとき) */
+  clearParts() {
+    this.partial.clear();
+    this.partialBytes = 0;
   }
 
   async handleRequest(op, reqId, records) {
@@ -370,6 +402,7 @@ class Session extends EventEmitter {
     this._fail(err);
     for (const w of this.pending.values()) { clearTimeout(w.timer); w.reject(err); }
     this.pending.clear();
+    this.clearParts();
     if (this.listenerCount('error')) this.emit('error', err);
     if (!keepLink) try { this.link.close(); } catch { /* 閉じていてもよい */ }
   }
@@ -382,6 +415,7 @@ class Session extends EventEmitter {
     this._fail(err);
     for (const w of this.pending.values()) { clearTimeout(w.timer); w.reject(err); }
     this.pending.clear();
+    this.clearParts();
     this.emit('close');
   }
 
@@ -392,6 +426,7 @@ class Session extends EventEmitter {
     this._fail(fail('closed', '接続を閉じました'));
     for (const w of this.pending.values()) clearTimeout(w.timer);
     this.pending.clear();
+    this.clearParts();
     this.link.close();
   }
 }

@@ -126,6 +126,32 @@ test('暗号文を書き換えると、受けた側は解けずに接続を閉�
   } finally { p.close(); }
 });
 
+test('組み立て途中のメッセージを多くのリクエスト ID で送られても、ためる量は上限までで、超えたものは STATUS=5 で断る', async () => {
+  const got = [];
+  const p = await pair({ handlers: { PUT: ({ records }) => { got.push(records); return 0; } } });
+  try {
+    const MAX = require('../../spec/messages.json').message.maxBodySize;   // 1 つのメッセージの上限(規格 7 章)
+    const line = 'R=' + '2400;'.repeat(14) + '2400\r\n';
+    const chunk = Buffer.from(line.repeat(Math.floor(3000 / line.length)), 'ascii');
+    // 200 KiB ずつ、続きのフラグを付けたまま 4 つのリクエスト ID で送る(合わせて 800 KiB)
+    for (let id = 100; id < 104; id++) {
+      for (let b = 0; b < 200 * 1024; b += chunk.length) await p.dev.sendMessage(P.OPS.PUT, id, 1, chunk);
+    }
+    await new Promise(r => setTimeout(r, 100));
+    assert.ok(p.host.partialBytes <= 2 * MAX, `ためている量 ${p.host.partialBytes}`);
+    // 終わりのフレームを送る。上限の中に収まった最初の 2 つは受け、超えた 2 つは STATUS=5
+    const waits = [];
+    for (let id = 100; id < 104; id++) {
+      waits.push(new Promise(r => p.dev.pending.set(id, { resolve: r, reject: r, timer: null })));
+      await p.dev.sendMessage(P.OPS.PUT, id, 0, Buffer.from(`JOB=M-${id}\r\n`, 'ascii'));
+    }
+    const res = await Promise.all(waits);
+    assert.deepEqual(res.map(x => x.status), [0, 0, 5, 5]);
+    assert.equal(p.host.partialBytes, 0);
+    assert.equal((await p.dev.request('PUT', [['JOB', 'M-N']])).status, 0);
+  } finally { p.close(); }
+});
+
 // ---- UART(線の上で化ける・落ちる) ----
 class Wire extends EventEmitter {
   constructor() { super(); this.peer = null; this.filter = b => b; }
@@ -152,6 +178,61 @@ test('UART: 化けた・落ちたフレームは再送し、2 度届いたフレ
   for (let i = 0; i < 3; i++) assert.equal((await dev.request('PUT', job)).status, 0);
   assert.equal(got.length, 3, '同じフレームを 2 度使っていない');
   assert.deepEqual(got[2].filter(x => x[0] === 'R').flatMap(x => x.slice(1)), radii(360));
+});
+
+// 位数の小さい点(X25519 の結果が全て 0 になる。規格 6 章)
+const LOW_ORDER = [
+  '0000000000000000000000000000000000000000000000000000000000000000',
+  '0100000000000000000000000000000000000000000000000000000000000000',
+  'e0eb7a7c3b41b8ae1656e3faf19fc46ada098deb9c32b1fd866205165f49b800',
+  '5f9c95bca3508c24b1d0b1559c83ef5b04445cc4581c8e86d8224eddd09f1157',
+  'ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f',
+].map(h => Buffer.from(h, 'hex'));
+
+test('X25519 の結果が全て 0 なら、計算を失敗として投げる', () => {
+  const kp = P.noise.keyPair();
+  for (const u of LOW_ORDER) assert.throws(() => P.noise.dh(kp, u), e => e.code === 'handshake');
+});
+
+test('TCP: 一時鍵が位数の小さい点のハンドシェイクには、ホストは失敗(理由 2)を返して閉じる', async () => {
+  const net = require('node:net');
+  const server = await P.listen(0, { keys: hostKeys, caps: hostCaps, trust: () => true });
+  try {
+    for (const u of LOW_ORDER) {
+      const reply = await new Promise((resolve, reject) => {
+        const s = net.connect(server.address().port, '127.0.0.1');
+        let got = Buffer.alloc(0);
+        s.on('data', d => { got = Buffer.concat([got, d]); });
+        s.on('close', () => resolve(got));
+        s.on('error', reject);
+        const frame = Buffer.concat([Buffer.from([P.VERSION, P.TYPES.hs1]), u]);
+        s.write(Buffer.concat([Buffer.from([0, frame.length]), frame]));
+      });
+      assert.deepEqual([...reply.subarray(0, 5)], [0, 3, P.VERSION, P.TYPES.fail, 2], u.toString('hex'));
+    }
+  } finally { server.close(); }
+});
+
+test('UART: 使用中に、一時鍵が位数の小さい点のハンドシェイクが届いても、ホストは前のセッションを続ける', async () => {
+  const [a, b] = wires();
+  const got = [];
+  const hostLink = new P.UartLink(b, { ackTimeoutMs: 50 });
+  const devLink = new P.UartLink(a, { ackTimeoutMs: 50 });
+  const host = new P.Session({ link: hostLink, role: 'host', keys: hostKeys, caps: hostCaps, trust: trust([devKeys.publicKey]), handlers: { PUT: ({ records }) => { got.push(records); return 0; } } });
+  const dev = new P.Session({ link: devLink, role: 'device', keys: devKeys, caps: edgerCaps, trust: trust([hostKeys.publicKey]) });
+  let hostError = null;
+  host.on('error', e => { hostError = e; });
+  host.start().catch(() => {});
+  await dev.start();
+  assert.equal((await dev.request('PUT', [['JOB', 'U-2']])).status, 0);
+  for (const [i, u] of LOW_ORDER.entries()) {
+    b.emit('data', P.uartEncode(0, 0x80 + i, Buffer.concat([Buffer.from([P.VERSION, P.TYPES.hs1]), u])));
+  }
+  await new Promise(r => setTimeout(r, 100));
+  assert.equal((await dev.request('PUT', [['JOB', 'U-3']])).status, 0);
+  assert.equal(got.length, 2);
+  assert.equal(hostError, null);
+  dev.close(); host.close();
 });
 
 test('UART: ACK がまったく来なければ、決めた回数だけ再送して失敗する', async () => {

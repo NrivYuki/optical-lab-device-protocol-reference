@@ -44,9 +44,9 @@ static int read_digits(const char *s, size_t n, int32_t *out) {
     if (!n) return 0;
     for (; i < n; i++) {
         if (s[i] < '0' || s[i] > '9') return 0;
-        v = sig || s[i] != '0' ? v * 10 + (s[i] - '0') : 0;
-        if (v) sig++;
-        if (sig > MAX_DIGITS) return 0;
+        if (!sig && s[i] == '0') continue;          /* 先頭の 0 */
+        if (++sig > MAX_DIGITS) return 0;           /* 掛ける前に確かめる(int32_t をあふれさせない) */
+        v = v * 10 + (s[i] - '0');
     }
     *out = v;
     return 1;
