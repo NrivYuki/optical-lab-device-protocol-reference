@@ -52,8 +52,11 @@ function parseDec(s, scale, signed) {
 function checkValue(spec, v) {
   switch (spec.type) {
     case 'int': {
-      if (!new RegExp(`^-?\\d{1,${MAX_DIGITS}}$`).test(v)) return false;
-      const n = Number(v);
+      // 符号(+ か -。省いてよい)と数字の並び。先頭の 0 は 9 桁に数えない(規格 10 章)
+      const m = /^([+-]?)(\d+)$/.exec(v);
+      if (!m || m[2].replace(/^0+(?=\d)/, '').length > MAX_DIGITS) return false;
+      if (m[1] === '-' && spec.min !== undefined && spec.min >= 0) return false;   // 負の値を取らない項目の -(-0 も)
+      const n = m[1] === '-' ? -Number(m[2]) || 0 : Number(m[2]);
       return (spec.min === undefined || n >= spec.min) && (spec.max === undefined || n <= spec.max);
     }
     case 'dec': return parseDec(v, spec.scale, !!spec.signed) !== null;

@@ -37,7 +37,7 @@ static void add_label(oldp_job *j, char *list, size_t cap, const char *a, size_t
     list[have + n] = 0;
 }
 
-/* 整数(符号と 9 桁まで)。*neg に符号。だめなら 0 */
+/* 数字の並びを読む(符号は呼ぶ側が除く)。先頭の 0 を除いて 9 桁まで。だめなら 0 */
 static int read_digits(const char *s, size_t n, int32_t *out) {
     int32_t v = 0;
     size_t i = 0, sig = 0;
@@ -54,8 +54,10 @@ static int read_digits(const char *s, size_t n, int32_t *out) {
 
 static int check_int(const oldp_field *f, const char *s, size_t n) {
     int neg = n && s[0] == '-';
+    size_t sign = n && (s[0] == '-' || s[0] == '+');   /* 符号は + か -。省いてよい(規格 10 章) */
     int32_t v;
-    if (!read_digits(s + neg, n - (size_t)neg, &v)) return 0;
+    if (!read_digits(s + sign, n - sign, &v)) return 0;
+    if (neg && (f->flags & OLDP_F_HAS_MIN) && f->min >= 0) return 0;   /* 負の値を取らない項目の -(-0 も) */
     if (neg) v = -v;
     if ((f->flags & OLDP_F_HAS_MIN) && v < f->min) return 0;
     if ((f->flags & OLDP_F_HAS_MAX) && v > f->max) return 0;

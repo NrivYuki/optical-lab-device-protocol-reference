@@ -183,7 +183,9 @@ static const char *const RV_LINES_28[] = { "TIME=2026", 0 };
 static const char *const RV_LINES_29[] = { "STATUS=0;ok", 0 };
 static const char *const RV_LINES_30[] = { "STATUS=x", 0 };
 static const char *const RV_LINES_31[] = { "TEXT=1234567890123456789012345678901234567890123456789012345678901", 0 };
-#define RV_CASES 32
+static const char *const RV_LINES_32[] = { "DBL=+18.00", "HBOX=052.00", "LMATID=+0000000001;0000123456789", "SPH=-0.00;+0.00", 0 };
+static const char *const RV_LINES_33[] = { "DBL=-18.00", "HBOX=+", "VBOX=+-1.00", "CIRC=1.2.3", "LMATID=01234567890;1", "AX=-0.00;0.00", "R=-0", "A=-1", "FCRV=4.", 0 };
+#define RV_CASES 34
 static const rec_v RV[] = {
   { "case 0", 0, 0, RV_LINES_0, "", "", 0 },
   { "case 1", 0, 0, RV_LINES_1, "", "", 0 },
@@ -217,6 +219,8 @@ static const rec_v RV[] = {
   { "case 29", 0, 0, RV_LINES_29, "", "", 0 },
   { "case 30", 0, 0, RV_LINES_30, "", "STATUS", 0 },
   { "case 31", 0, 0, RV_LINES_31, "", "TEXT", 0 },
+  { "case 32", 0, 0, RV_LINES_32, "", "", 0 },
+  { "case 33", 0, 0, RV_LINES_33, "", "DBL;HBOX;VBOX;CIRC;LMATID;AX;R;A;FCRV", 0 },
 };
 #define RV_MALFORMED 2
 static const char *const RV_MALFORMED_V[] = { "123456789012345678901234567890123456789012345678901234567890123456789012345678901", "=1" };

@@ -32,7 +32,9 @@
     { "name": "形の違う時刻", "accept": null, "ext": [], "lines": ["TIME=2026"], "used": [], "ignored": [], "rejected": ["TIME"], "badTrace": false },
     { "name": "番号と説明の項目", "accept": null, "ext": [], "lines": ["STATUS=0;ok"], "used": ["STATUS"], "ignored": [], "rejected": [], "badTrace": false },
     { "name": "番号が数でない", "accept": null, "ext": [], "lines": ["STATUS=x"], "used": [], "ignored": [], "rejected": ["STATUS"], "badTrace": false },
-    { "name": "説明の文字数の上限を超える", "accept": null, "ext": [], "lines": ["TEXT=1234567890123456789012345678901234567890123456789012345678901"], "used": [], "ignored": [], "rejected": ["TEXT"], "badTrace": false }
+    { "name": "説明の文字数の上限を超える", "accept": null, "ext": [], "lines": ["TEXT=1234567890123456789012345678901234567890123456789012345678901"], "used": [], "ignored": [], "rejected": ["TEXT"], "badTrace": false },
+    { "name": "数の書き方: + と先頭の 0 は受け、先頭の 0 は 9 桁に数えない。-0 は 0", "accept": null, "ext": [], "lines": ["DBL=+18.00", "HBOX=052.00", "LMATID=+0000000001;0000123456789", "SPH=-0.00;+0.00"], "used": ["DBL", "HBOX", "LMATID", "SPH"], "ignored": [], "rejected": [], "badTrace": false },
+    { "name": "数の書き方: 符号だけ、符号の重なり、. の重なり、. の後に数字が無い、負の値を取らない項目の -(-0 も)、先頭の 0 を除いて 10 桁の数は受けない", "accept": null, "ext": [], "lines": ["DBL=-18.00", "HBOX=+", "VBOX=+-1.00", "CIRC=1.2.3", "LMATID=01234567890;1", "AX=-0.00;0.00", "R=-0", "A=-1", "FCRV=4."], "used": [], "ignored": [], "rejected": ["DBL", "HBOX", "VBOX", "CIRC", "LMATID", "AX", "R", "A", "FCRV"], "badTrace": false }
   ],
   "malformed": [
     "123456789012345678901234567890123456789012345678901234567890123456789012345678901",
