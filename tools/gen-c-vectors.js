@@ -61,6 +61,8 @@ out.push(
   'typedef struct { const char *raw, *enc; } cobs_v;',
   `#define PV_COBS ${PV.cobs.length}`,
   'static const cobs_v PV_COBS_V[] = {', ...PV.cobs.map(c => `  { ${cstr(c.raw)}, ${cstr(c.encoded)} },`), '};',
+  `#define PV_COBS_DEC ${PV.cobsDecode.length}`,
+  'static const cobs_v PV_COBS_DEC_V[] = {', ...PV.cobsDecode.map(c => `  { ${cstr(c.raw)}, ${cstr(c.encoded)} },`), '};',
   'typedef struct { int kind, seq; const char *body, *wire; } uart_v;',
   `#define PV_UART ${PV.uart.length}`,
   'static const uart_v PV_UART_V[] = {', ...PV.uart.map(c => `  { ${c.kind}, ${c.seq}, ${cstr(c.body)}, ${cstr(c.wire)} },`), '};',

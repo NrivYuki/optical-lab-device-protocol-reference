@@ -15,6 +15,7 @@ test('COBS', () => {
     assert.equal(P.cobs.encode(hex(c.raw)).toString('hex'), c.encoded);
     assert.equal(P.cobs.decode(hex(c.encoded)).toString('hex'), c.raw);
   }
+  for (const c of V.cobsDecode) assert.equal(P.cobs.decode(hex(c.encoded)).toString('hex'), c.raw, '末尾に 0x01 を足した形も戻せる');
 });
 
 test('CRC-32', () => { for (const c of V.crc32) assert.equal(P.crc32(Buffer.from(c.text)).toString(16).padStart(8, '0'), c.crc); });

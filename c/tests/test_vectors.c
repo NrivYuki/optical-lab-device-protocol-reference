@@ -237,6 +237,12 @@ static void test_protocol_primitives(void) {
         cn = oldp_cobs_decode(b, bn, c, sizeof c);
         check_bytes("COBS ベクタ(戻す)", c, cn, a, an);
     }
+    for (i = 0; i < PV_COBS_DEC; i++) {   /* 末尾に 0x01 を足した形も戻せる(規格 4 章) */
+        unhex(PV_COBS_DEC_V[i].raw, a, &an);
+        unhex(PV_COBS_DEC_V[i].enc, b, &bn);
+        cn = oldp_cobs_decode(b, bn, c, sizeof c);
+        check_bytes("COBS ベクタ(受ける側だけ)", c, cn, a, an);
+    }
     for (i = 0; i < PV_FP; i++) {
         char fp[20];
         unhex(PV_FP_V[i].pub, a, NULL);

@@ -11,6 +11,7 @@
     { "name": "DCS の ? は値として受けない", "accept": null, "ext": [], "lines": ["DBL=?"], "used": [], "ignored": [], "rejected": ["DBL"], "badTrace": false },
     { "name": "決まった値に無いものは受けない", "accept": null, "ext": [], "lines": ["ETYP=9", "DO=X"], "used": [], "ignored": [], "rejected": ["ETYP", "DO"], "badTrace": false },
     { "name": "値の数: 右眼;左眼の項目に 1 つだけ", "accept": null, "ext": [], "lines": ["SPH=-1.00"], "used": [], "ignored": [], "rejected": ["SPH"], "badTrace": false },
+    { "name": "値の数: 右眼;左眼の項目の片側が空", "accept": null, "ext": [], "lines": ["SPH=;-1.00", "CYL=-0.50;"], "used": [], "ignored": [], "rejected": ["SPH", "CYL"], "badTrace": false },
     { "name": "値の数: 1 つの項目に 2 つ", "accept": null, "ext": [], "lines": ["DBL=18;18"], "used": [], "ignored": [], "rejected": ["DBL"], "badTrace": false },
     { "name": "値の数: 1 つか 2 つの項目に 3 つ", "accept": null, "ext": [], "lines": ["HBOX=1;2;3"], "used": [], "ignored": [], "rejected": ["HBOX"], "badTrace": false },
     { "name": "桁数の上限ちょうどの小数は受ける(10^scale 倍で 9 桁)", "accept": null, "ext": [], "lines": ["DBL=1234567.00"], "used": ["DBL"], "ignored": [], "rejected": [], "badTrace": false },
