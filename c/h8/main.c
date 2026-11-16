@@ -15,8 +15,11 @@
  *   baud [速度]    線の速度を見る・変える(9600・19200・38400・57600。フラッシュに残す)。"ok" を今の速度で返してから切り替える。
  *                  115200 も受け付けるが、20 MHz では実際の速度が 125000 bps(+8.5%)になり、規格の差の範囲(4 章)に合わない。
  *                  更新の仕組みは常に 9600 bps で動く
- *   rekey 1        機器の鍵を新しい鍵に替える(標準の拡張 OLDPKEY。ホストが受け付けたらフラッシュに残す)
- *   keyreset       書き込んだときの鍵に戻す
+ *   seed <16 進 64 文字>  新しい乱数の種を入れる(フラッシュに残し、乱数のたまりに混ぜる。規格 15 章: 鍵の交換の前に要る)
+ *   boot           起動の回数と、それをフラッシュに書けたか(mixed)、この起動で種を入れたか(seeded)を表示する
+ *   rekey 1        機器の鍵を新しい鍵に替える(標準の拡張 OLDPKEY。ホストが受け付けたらフラッシュに残す)。
+ *                  新しい種を入れてから、まだ鍵の交換に使っていないときだけ行う(そうでなければ need-seed)
+ *   keyreset       書き込んだときの鍵に戻す(入れ直した種は残す)
  *   bench          X25519 を 1 回計算する前後に "bench-start" "bench-end" を返す(時間は PC の側で測る)
  *   log            最後のセッションの結果を返す
  *   reset          起動の入口へ飛ぶ(更新の仕組みが 500 ms だけ合図を待つ)
@@ -73,7 +76,9 @@ static uint8_t ent_i;
 
 #ifdef OLDP_RNG_TRACE
 /* 試験用の組み立て(make trace)だけ: stir が受けた TCNT0 の下位 8 ビットを記録する。変数の領域に空きがないので、
- * 内蔵の書き込みプログラムの取り出し先(0xffdf20 から)を使う。rngtrace の間はフラッシュに書かないので重ならない。
+ * 内蔵の書き込みプログラムの取り出し先(0xffdf20 から)を使う。起動の直後に起動の回数をフラッシュへ書く(boot_count)と、
+ * 記録と記録の数が書き込みのプログラムで上書きされるので、書いた後に記録を空にし直す(起動の直後の記録 rngboot は、その後から)。
+ * rngtrace などの間はフラッシュに書かないので重ならない。
  * スタック(0xffff00 から下へ)とは 4 KB 離れている */
 #define TR_MAX 4096
 #define TR_BUF ((volatile uint8_t *)0xffdf20UL)
@@ -172,6 +177,13 @@ static uint8_t store_block_safe(const uint8_t *p, uint32_t addr, uint8_t block, 
     return r;
 }
 static uint8_t store_safe(const uint8_t *p, uint32_t addr, uint8_t block) { return store_block_safe(p, addr, block, 1); }
+static uint8_t store_program_safe(const uint8_t *p, uint32_t addr) {
+    uint8_t r;
+    __asm__ volatile ("orc #0x80,ccr");
+    r = store_program(p, addr);
+    if (irq_on) __asm__ volatile ("andc #0x7f,ccr");
+    return r;
+}
 
 static int getc_now(void) {
     unsigned char s, c;
@@ -257,7 +269,12 @@ static void hosts_save(void) {
  * 20 MHz、φ/1 では、BRR = 20 MHz / (32 × 速度) - 1。実際の速度と差は、
  *   9600: 64 → 9615 bps(+0.16%)  19200: 32 → 18939 bps(-1.36%)  38400: 15 → 39063 bps(+1.73%)
  *   57600: 10 → 56818 bps(-1.36%)  115200: 4 → 125000 bps(+8.51%。規格 4 章の差の範囲に合わない) */
-static const struct { uint32_t bps; uint8_t brr; } BAUDS[] = { { 9600, 64 }, { 19200, 32 }, { 38400, 15 }, { 57600, 10 }, { 115200, 4 } };
+/* 115200 bps は差が規格 4 章の範囲を超えるので、試験用の組み立て(規格に合わない速度を試すため)だけで選べる */
+static const struct { uint32_t bps; uint8_t brr; } BAUDS[] = { { 9600, 64 }, { 19200, 32 }, { 38400, 15 }, { 57600, 10 },
+#ifdef OLDP_RNG_TRACE
+    { 115200, 4 },
+#endif
+};
 #define BRR_DEFAULT 64
 
 static uint8_t brr_now(void) {
@@ -283,14 +300,25 @@ static void set_brr(uint8_t brr) {
     SCI1_SSR = (unsigned char)(SCI1_SSR & ~(SSR_ORER | SSR_FER | SSR_PER));
 }
 
+/* 受付の間に信じたホスト。覚えるのは受け入れの通知を受けたとき(規格 6 章) */
+static uint8_t pend_host, remembered;
+
 static int trust(void *app, const uint8_t pub[32], const char *fp, const char *caps, size_t len) {
     uint8_t i;
     (void)app; (void)pub; (void)caps; (void)len;
     for (i = 0; i < page.count; i++) if (!memcmp(page.hosts[i], fp, 19)) return 1;
     if (!pairing || (int32_t)(pair_until - now_ms()) <= 0 || page.count >= HOST_MAX) return 0;
-    memcpy(page.hosts[page.count++], fp, 20);
-    dirty = 1;
+    memcpy(page.hosts[page.count], fp, 20);
+    pend_host = 1;
     return 1;
+}
+
+/* 受け入れの通知を受けたら、受付の間に信じたホストを覚える。受けなければ捨てる */
+static void pair_commit(int accepted) {
+    if (!pend_host) return;
+    pend_host = 0;
+    if (accepted) { page.count++; dirty = 1; remembered = 1; }
+    else memset(page.hosts[page.count], 0, sizeof page.hosts[0]);
 }
 
 /* ---- ケイパビリティ ---- */
@@ -298,7 +326,7 @@ static char caps[256];
 static uint16_t trace_points = 360;
 
 static void caps_build(void) {
-    static const char A[] = "VER=1.0\r\nDEV=EDG\r\nVEN=H8\r\nMODEL=3069F\r\nSN=H8-0001\r\nMAXFRAME=512\r\n"
+    static const char A[] = "VER=1.1\r\nDEV=EDG\r\nVEN=H8\r\nMODEL=3069F\r\nSN=H8-0001\r\nMAXFRAME=512\r\n"
         "LABELS=JOB;DO;DBL;HBOX;VBOX;CIRC;FCRV;TRCFMT;R;A\r\nLABELS=ETYP;BEVP;BEVM;BEVC;POLISH;LIND;SPH;CYL;AX;IPD;OCHT\r\nEXT=OLDPKEY\r\nTRACE=";
     size_t n = sizeof A - 1;
     char d[6];
@@ -353,26 +381,92 @@ static int on_request(void *app, uint8_t op, const char *body, size_t len, char 
     return 1;
 }
 
-/* ---- 機器の鍵(交換した鍵はフラッシュの EB14 に残す。本体の更新では消えない) ---- */
+/* ---- 機器の鍵と、入れ直した乱数の種(フラッシュの EB14 に残す。本体の更新では消えない) ----
+ * 規格 15 章: 2 章の 2 の方法の機器は、交換する静的鍵を、新しく入れた種で作る。種は seed コマンド(人の操作)で入れ、
+ * 鍵の交換に 1 度使ったら、次の交換には新しい種を入れ直す */
 #define KEY_ADDR 0x60000UL
 #define KEY_BLOCK 14
 #define OP_KEY_CHANGE 0x80
-typedef struct { uint8_t magic[4]; uint8_t priv[32], pub[32]; char fp[20]; uint8_t rest[36]; uint32_t crc; } key_page;   /* 128 バイト */
+#define KF_KEY 1            /* priv・pub・fp が、交換した鍵 */
+#define KF_SEED 2           /* seed が、入れ直した種 */
+#define KF_FRESH 4          /* その種を、まだ鍵の交換に使っていない */
+#define E_NEED_SEED (-20)   /* 新しい種が要る(鍵の交換の前、又は起動の回数を書けなかった起動) */
+typedef struct { uint8_t magic[4]; uint8_t priv[32], pub[32]; char fp[20]; uint8_t seed[32]; uint8_t flags, pad[3]; uint32_t crc; } key_page;   /* 128 バイト */
 static key_page kp __attribute__((aligned(4)));
-static const uint8_t KEY_MAGIC[4] = { 'V', 'K', '1', 0 };
+static const uint8_t KEY_MAGIC[4] = { 'V', 'K', '2', 0 };
+static const uint8_t KEY_MAGIC_V1[4] = { 'V', 'K', '1', 0 };   /* 種を持たない前の形(鍵だけ) */
 static const uint8_t *my_priv = DEVICE_KEY, *my_pub = DEVICE_PUB;
 static const char *my_fp = DEVICE_FP;
 
-static void keys_load(void) {
+/* フラッシュの鍵のページ。正しくなければ NULL。*flags に KF_* を返す */
+static const key_page *key_flash(uint8_t *flags) {
     const key_page *p = (const key_page *)KEY_ADDR;
-    if (!memcmp(p->magic, KEY_MAGIC, 4) && oldp_crc32((const uint8_t *)p, 124) == p->crc) { my_priv = p->priv; my_pub = p->pub; my_fp = p->fp; }
+    *flags = 0;
+    if (oldp_crc32((const uint8_t *)p, 124) != p->crc) return NULL;
+    if (!memcmp(p->magic, KEY_MAGIC, 4)) { *flags = p->flags; return p; }
+    if (!memcmp(p->magic, KEY_MAGIC_V1, 4)) { *flags = KF_KEY; return p; }
+    return NULL;
+}
+
+static void keys_load(void) {
+    uint8_t f;
+    const key_page *p = key_flash(&f);
+    if (p && (f & KF_KEY)) { my_priv = p->priv; my_pub = p->pub; my_fp = p->fp; }
     else { my_priv = DEVICE_KEY; my_pub = DEVICE_PUB; my_fp = DEVICE_FP; }
+}
+
+/* 起動したとき: 入れ直した種があれば、乱数のたまりに混ぜる */
+static void seed_load(void) {
+    uint8_t f;
+    const key_page *p = key_flash(&f);
+    if (p && (f & KF_SEED)) oldp_sha256_update(&pool, p->seed, 32);
+}
+
+/* kp を鍵のページとしてフラッシュに書く */
+static uint8_t key_store(void) {
+    memcpy(kp.magic, KEY_MAGIC, 4);
+    memset(kp.pad, 0xff, sizeof kp.pad);
+    kp.crc = oldp_crc32((const uint8_t *)&kp, 124);
+    return store_safe((const uint8_t *)&kp, KEY_ADDR, KEY_BLOCK);
+}
+
+/* kp に、フラッシュの今の内容(無ければ空)を読む */
+static void key_read(void) {
+    uint8_t f;
+    const key_page *p = key_flash(&f);
+    memset(&kp, 0, sizeof kp);
+    if (p) { memcpy(&kp, p, sizeof kp); if (f == KF_KEY) { memset(kp.seed, 0, sizeof kp.seed); } kp.flags = f; }
+}
+
+static int hexval(char c) { return c >= '0' && c <= '9' ? c - '0' : c >= 'a' && c <= 'f' ? c - 'a' + 10 : c >= 'A' && c <= 'F' ? c - 'A' + 10 : -1; }
+
+/* 規格 2 章: 起動のたびに、前の起動と違う値を混ぜる。起動の回数をフラッシュに書けた起動(boot_mixed)か、
+ * この起動の間に seed で種を入れた起動(seeded)でなければ、一時鍵を作らない(セッションを始めない) */
+static uint8_t boot_mixed, seeded;
+static uint32_t boot_now;   /* この起動の回数 */
+
+/* seed <16 進 64 文字>: 新しい種を入れる。乱数のたまりに混ぜ、フラッシュに残す(FWE=0 で残せなくても、この起動では混ぜる) */
+static void do_seed(const char *hex) {
+    uint8_t i;
+    key_read();
+    for (i = 0; i < 32; i++) {
+        int a = hexval(hex[2 * i]), b = a < 0 ? -1 : hexval(hex[2 * i + 1]);
+        if (b < 0) { memset(&kp, 0, sizeof kp); put_text("?"); return; }
+        kp.seed[i] = (uint8_t)(a << 4 | b);
+    }
+    if (hex[64]) { memset(&kp, 0, sizeof kp); put_text("?"); return; }
+    kp.flags = (uint8_t)(kp.flags | KF_SEED | KF_FRESH);
+    oldp_sha256_update(&pool, kp.seed, 32);
+    seeded = 1;
+    put_text(key_store() ? "ok not-stored" : "ok");
+    memset(&kp, 0, sizeof kp);
 }
 
 static uint8_t via_lan;
 static int last_net;
 
 static int session_open(void) {
+    if (!boot_mixed && !seeded) { put_text("need-seed"); return E_NEED_SEED; }
     if (via_lan) {
         uint8_t seed[6];
         int r;
@@ -385,11 +479,16 @@ static int session_open(void) {
         if (r) return OLDP_E_IO;
     } else oldp_dev_init(&dev, (oldp_io){ 0, io_write, io_read, 0 }, OLDP_UART, my_priv, caps, rng);
     dev.trust = trust;
+    dev.now_ms = now_ms;
     dev.on_request = on_request;
     dev.s_pub = my_pub;
     avail_job[0] = 0;
     sci_err = 0; rxq_lost = 0;
-    return oldp_dev_open(&dev);
+    {
+        int r = oldp_dev_open(&dev);
+        pair_commit(r == OLDP_OK);
+        return r;
+    }
 }
 
 /* PUT の中身を作る場所。loader コマンドでは、更新の仕組みの中身を受ける場所に使う(RAM の残りが少ないため) */
@@ -408,7 +507,9 @@ static int op_put(const char *job, int *st) {
 
 /* GET して、項目ごとの扱いを RESULT で返す */
 static int op_get(const char *name, int *st) {
-    static char req[64], rep[256];
+    /* 要求と RESULT の中身は、GET の間は使わない PUT の場所に置く(RAM の残りが少ないため) */
+    char *req = body, *rep = body + 64;
+    const size_t rep_cap = 256;
     size_t k = strlen(name), n;
     uint8_t rop = 0;
     int r;
@@ -418,7 +519,7 @@ static int op_get(const char *name, int *st) {
     r_get = r;
     if (r || rop != OLDP_DATA_OP) return r;
     oldp_job_finish(&got);
-    n = oldp_job_result(&got, name, rep, sizeof rep);
+    n = oldp_job_result(&got, name, rep, rep_cap);
     r_result = r = oldp_dev_request(&dev, OLDP_RESULT, rep, n, 0, 0, &rop, st);
     return r;
 }
@@ -465,14 +566,25 @@ static void do_ops(const char *job, const char *name) {
 }
 
 /* AVAIL を待って、知らされたジョブを取りに行く */
+#define KEEPALIVE_MS 300000UL   /* spec/messages.json の timeouts.keepAliveMs */
+
 static void do_wait(uint32_t seconds) {
     int st = -1, st2 = -1, r = session_open();
-    uint32_t start = now_ms(), lim = seconds * 1000UL;
+    uint32_t start = now_ms(), lim = seconds * 1000UL, heard = now_ms();
     r_get = r_result = r_info = -99;
     while (!r && !avail_job[0]) {
         if (now_ms() - start >= lim) { r = OLDP_E_TIMEOUT; break; }
         r = oldp_dev_poll(&dev, 1000);
         if (r == OLDP_E_TIMEOUT) r = 0;
+        else if (!r) heard = now_ms();
+        /* UART: ホストから 5 分間何も届かなければ PING を送る。時間切れが 2 度続けば、ライブラリが新しいハンドシェイクを始める(規格 4 章) */
+        if (!r && !via_lan && now_ms() - heard >= KEEPALIVE_MS) {
+            uint8_t rop;
+            int st3;
+            r = oldp_dev_request(&dev, OLDP_PING, NULL, 0, 0, 0, &rop, &st3);
+            if (r == OLDP_E_TIMEOUT) r = 0;
+            heard = now_ms();
+        }
     }
     if (!r) r = op_get(avail_job, &st);
     if (!r) r_info = r = op_info(avail_job, &st2);
@@ -483,8 +595,16 @@ static void do_wait(uint32_t seconds) {
 static void do_rekey(void) {
     static const char H[] = "0123456789abcdef";
     static char body[96];
-    int r = session_open(), st = -1;
+    int r, st = -1;
     uint8_t rop, i;
+    key_read();
+    if (!(kp.flags & KF_FRESH)) {      /* 新しく入れた種で作る(規格 15 章) */
+        memset(&kp, 0, sizeof kp);
+        put_text("need-seed");
+        last_rc = E_NEED_SEED; last_status = -1;
+        return;
+    }
+    r = session_open();
     if (!r) {
         size_t n = 0;
         rng(kp.priv, 32);
@@ -494,15 +614,13 @@ static void do_rekey(void) {
         body[n++] = '\r'; body[n++] = '\n';
         r = oldp_dev_request(&dev, OP_KEY_CHANGE, body, n, 0, 0, &rop, &st);
         if (!r && st == 0) {
-            memcpy(kp.magic, KEY_MAGIC, 4);
             oldp_fingerprint(kp.pub, kp.fp);
-            memset(kp.rest, 0xff, sizeof kp.rest);
-            kp.crc = oldp_crc32((const uint8_t *)&kp, 124);
-            if (store_safe((const uint8_t *)&kp, KEY_ADDR, KEY_BLOCK)) put_text("\r\nstore-failed");
+            kp.flags = (uint8_t)((kp.flags | KF_KEY) & ~KF_FRESH);   /* この種は使った */
+            if (key_store()) put_text("\r\nstore-failed");
             keys_load();
         }
-        memset(&kp, 0, sizeof kp);
     }
+    memset(&kp, 0, sizeof kp);
     last_rc = r; last_status = st;
 }
 
@@ -581,7 +699,10 @@ static void begin(const char *line) {
 }
 
 static void end_session(void) {
-    pairing = 0;
+    pair_commit(dev.ready);   /* セッションの途中でやり直したハンドシェイク(規格 4 章)で信じたホスト */
+    /* 受付は、5 分たったとき、又はホストを覚えたセッションが終わったときに終わる(規格 6 章) */
+    if (remembered) pairing = 0;
+    remembered = 0;
     if (via_lan) net_close();
     wait_ms(via_lan ? 0 : 500);
     if (dirty) hosts_save();
@@ -723,6 +844,39 @@ static void put_log(void) {
     if (!via_lan) { put_text(" resent="); put_dec(dev.link.resent); put_text(" bad_units="); put_dec(dev.link.bad_units); put_text(" sci_err="); put_dec(sci_err); put_text(" rxq_lost="); put_dec(rxq_lost); put_text(" irq="); put_dec(irq_on); }
 }
 
+/* ---- 起動の回数(規格 2 章: 2 の方法の機器は、起動のたびに前の起動と違う値を混ぜる) ----
+ * EB13 に 128 バイトのページ(回数と CRC-32)を、消さずに 1 つずつ書き足す。ブロックを消すのは 512 回の起動に 1 回で、
+ * フラッシュの書き換えの回数を早く使い切らない。FWE=0 で書けないときは、回数を混ぜられない(docs/results.md の制限) */
+#define BOOT_ADDR 0x50000UL
+#define BOOT_BLOCK 13
+#define BOOT_PAGES 512
+
+static void boot_count(void) {
+    uint32_t *pg = (uint32_t *)body;   /* 起動したときは使っていない、偶数番地の RAM */
+    uint32_t last = 0;
+    uint16_t i;
+    /* 128 バイトが全て消えたままのページを、書き足す先にする。書きかけで止まったページ(CRC が合わず、消えてもいない)は飛ばす */
+    for (i = 0; i < BOOT_PAGES; i++) {
+        const uint32_t *p = (const uint32_t *)(BOOT_ADDR + 128UL * i);
+        uint8_t k, erased = 1;
+        for (k = 0; k < 32 && erased; k++) if (p[k] != 0xffffffffUL) erased = 0;
+        if (erased) break;
+        if (oldp_crc32((const uint8_t *)p, 4) == p[1] && p[0] > last) last = p[0];
+    }
+    memset(pg, 0xff, 128);
+    pg[0] = last + 1;
+    boot_now = pg[0];
+    pg[1] = oldp_crc32((const uint8_t *)pg, 4);
+    if (i < BOOT_PAGES) boot_mixed = (uint8_t)!store_program_safe((const uint8_t *)pg, BOOT_ADDR + 128UL * i);
+    else boot_mixed = (uint8_t)!store_safe((const uint8_t *)pg, BOOT_ADDR, BOOT_BLOCK);
+    /* 書けたかを、読み直して確かめる(書けなければ、前の起動と同じ回数を混ぜたことになる) */
+    if (boot_mixed) {
+        const uint32_t *p = (const uint32_t *)(BOOT_ADDR + 128UL * (i < BOOT_PAGES ? i : 0));
+        boot_mixed = (uint8_t)(p[0] == pg[0] && p[1] == pg[1]);
+    }
+    oldp_sha256_update(&pool, (const uint8_t *)pg, 8);
+}
+
 int main(void) {
     static char line[80];
     uint8_t i;
@@ -734,20 +888,26 @@ int main(void) {
     irq_init();
     if (brr_now() != BRR_DEFAULT) set_brr(brr_now());
     keys_load();
+    seed_load();
+    boot_count();
+#ifdef OLDP_RNG_TRACE
+    TR_N = 0; TR_SESS = 0;   /* 書き込みのプログラムが記録の場所を上書きしたので、ここから記録し直す */
+#endif
     caps_build();
     if (page.net.set == 1) net_up(&page.net);
 #if defined(OLDP_UBSAN)
-    put_text("\r\noldp-h8 1.0 ubsan ");
+    put_text("\r\noldp-h8 1.1 ubsan ");
 #elif defined(OLDP_RNG_TRACE)
-    put_text("\r\noldp-h8 1.0 rngtrace ");
+    put_text("\r\noldp-h8 1.1 rngtrace ");
 #else
-    put_text("\r\noldp-h8 1.0 ");
+    put_text("\r\noldp-h8 1.1 ");
 #endif
     put_text(my_fp);
     put_text("\r\noldp> ");
     for (;;) {
         get_line(line, sizeof line);
         if (!memcmp(line, "id", 3)) { put_text("ID "); put_text(my_fp); }
+        else if (!memcmp(line, "boot", 5)) { put_text("boot="); put_dec((int32_t)boot_now); put_text(" mixed="); put_dec(boot_mixed); put_text(" seeded="); put_dec(seeded); }
         else if (!memcmp(line, "pair", 5)) { pairing = 1; pair_until = now_ms() + PAIR_WINDOW_MS; put_text("ok"); }
         else if (!memcmp(line, "hosts", 6)) {
             put_text("hosts="); put_dec(page.count);
@@ -767,9 +927,17 @@ int main(void) {
         }
         else if (starts(line, "wait ")) { begin(line); do_wait(to_u(line + 5)); end_session(); }
         else if (starts(line, "rekey ")) { begin(line); do_rekey(); end_session(); }
+        else if (starts(line, "seed ")) { do_seed(line + 5); memset(line, 0, sizeof line); }   /* 種を RAM に残さない */
         else if (!memcmp(line, "keyreset", 9)) {
+            /* 鍵だけを書き込んだときのものに戻す。入れ直した種は、起動のたびに混ぜるので残す */
+            uint8_t r;
+            key_read();
+            memset(kp.priv, 0, sizeof kp.priv); memset(kp.pub, 0, sizeof kp.pub); memset(kp.fp, 0, sizeof kp.fp);
+            kp.flags = (uint8_t)(kp.flags & ~KF_KEY);
+            if (kp.flags & KF_SEED) r = key_store();
+            else { memset(&kp, 0, sizeof kp); r = store_safe((const uint8_t *)&kp, KEY_ADDR, KEY_BLOCK); }
             memset(&kp, 0, sizeof kp);
-            put_text(store_safe((const uint8_t *)&kp, KEY_ADDR, KEY_BLOCK) ? "store-failed" : "ok");
+            put_text(r ? "store-failed" : "ok");
             keys_load();
         }
         else if (!memcmp(line, "lan", 4)) {

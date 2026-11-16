@@ -7,7 +7,8 @@
  *   'E' 長さ(4) CRC-32(4)              本体の範囲の消去
  *   'W' 番地(4) 中身(128) CRC-32(4)    128 バイトの書き込み(番地は 0x1000 以上で 128 バイト境界。CRC は番地と中身の 132 バイト)
  *                                      書いたあと読み直し、違えば 'N' 6 と、位置・読めた値・書いた値を返す
- *   'R' 番地(4) 長さ(2)                フラッシュの中身をそのまま返す(調べるため)
+ *   消去と書き込みは、本体の範囲(EB12 まで)に限る。EB13-EB15(起動の回数、機器の鍵と種、覚えたホスト)は触らない。
+ *   フラッシュを読み出す手順は持たない(本体に埋め込んだ鍵と種、EB14 の鍵と種を、外へ出さないため。規格 6 章)
  *   'V'                                書いた範囲を読み直して CRC-32 を比べる
  *   'G'                                本体へ飛ぶ(答えは返さない) */
 #include <stdint.h>
@@ -23,7 +24,7 @@
 #define FCCS_FWE 0x80
 
 #define APP_BASE  0x1000UL
-#define FLASH_END 0x80000UL
+#define FLASH_END 0x50000UL           /* 本体の範囲の終わり(EB13 の始まり)。ここから先は本体が使うブロック */
 #define FTDAR_VAL 3                   /* ダウンロード先の指定(H'00=H'FFEF20、H'01=H'FFDF20、H'02=H'FFCF20、H'03=H'FFBF20) */
 #define DLTOP     0xffbf20UL          /* FTDAR=3 のときのダウンロード先。更新の仕組みは 0xffd000 からなので重ならない */
 #define MAGIC_ADDR (*(volatile uint32_t *)0xffff10)
@@ -134,12 +135,6 @@ static void update(void) {
                 if (got != page[i]) { nak(6); put(i); put(got); put(page[i]); break; }
             }
             if (i == 128) put('K');
-        } else if (c == 'R') {
-            /* 調べるため: 番地(4) 長さ(2) のフラッシュの中身をそのまま返す */
-            uint32_t a = get32();
-            uint16_t n = (uint16_t)((uint16_t)get() << 8);
-            n |= get();
-            while (n--) put(*(const volatile uint8_t *)a++);
         } else if (c == 'V') {
             if (len && oldp_crc32((const uint8_t *)APP_BASE, len) == want) put('K'); else nak(5);
         } else if (c == 'G') {

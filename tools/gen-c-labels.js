@@ -6,6 +6,7 @@ const path = require('node:path');
 const root = path.join(__dirname, '..');
 const DICT = JSON.parse(fs.readFileSync(path.join(root, 'spec', 'labels.json'), 'utf8'));
 
+const TIME_PATTERN = '^[0-9]{4}(0[1-9]|1[0-2])(0[1-9]|[12][0-9]|3[01])([01][0-9]|2[0-3])[0-5][0-9][0-5][0-9]$';
 const fields = [];
 const key = new Map();
 function fieldIndex(f) {
@@ -14,12 +15,16 @@ function fieldIndex(f) {
   const flags = [];
   if (f.signed) flags.push('OLDP_F_SIGNED');
   if (f.optional) flags.push('OLDP_F_OPTIONAL');
-  if (f.type === 'int' && f.min !== undefined) flags.push('OLDP_F_HAS_MIN');
-  if (f.type === 'int' && f.max !== undefined) flags.push('OLDP_F_HAS_MAX');
-  if (f.pattern === '^[0-9]{14}$') flags.push('OLDP_F_DIGITS');
+  const num = f.type === 'int' || f.type === 'dec';
+  if (num && f.min !== undefined) flags.push('OLDP_F_HAS_MIN');
+  if (num && f.max !== undefined) flags.push('OLDP_F_HAS_MAX');
+  // 時刻(YYYYMMDDhhmmss)の pattern だけを、C の決まった確かめに置き換える
+  if (f.pattern === TIME_PATTERN) flags.push('OLDP_F_TIME');
   else if (f.pattern) throw new Error(`pattern ${f.pattern} を表にできません`);
-  const min = f.type === 'int' ? f.min || 0 : 0;
-  const max = f.type === 'int' ? f.max || 0 : f.type === 'text' ? f.max || 80 : 0;
+  // dec の min・max は値そのものの範囲なので、10^scale 倍して整数で持つ
+  const unit = f.type === 'dec' ? 10 ** (f.scale || 0) : 1;
+  const min = num ? (f.min || 0) * unit : 0;
+  const max = num ? (f.max || 0) * unit : f.type === 'text' ? f.max || 80 : 0;
   const vals = f.type === 'enum' ? `"${Object.keys(f.values).join('|')}"` : '0';
   const s = `{ ${type}, ${f.scale || 0}, ${flags.join(' | ') || 0}, ${min}, ${max}L, ${vals} }`.replace(/, (-?\d+), (\d+)L,/, ', $1L, $2L,');
   if (!key.has(s)) { key.set(s, fields.length); fields.push(s); }
@@ -59,7 +64,7 @@ enum { OLDP_T_INT, OLDP_T_DEC, OLDP_T_ENUM, OLDP_T_TEXT };
 #define OLDP_F_OPTIONAL 2
 #define OLDP_F_HAS_MIN 4
 #define OLDP_F_HAS_MAX 8
-#define OLDP_F_DIGITS 16
+#define OLDP_F_TIME 16
 
 typedef struct { uint8_t type, scale, flags; int32_t min, max; const char *vals; } oldp_field;
 typedef struct { const char *name; uint8_t kind, first, count; } oldp_label;

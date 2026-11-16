@@ -6,15 +6,25 @@ const LINE_MAX = require('../../spec/messages.json').message.maxLineLength;
 const MAX_DIGITS = 9;       // 整数と 10^scale 倍した小数の桁数の上限(32 ビットの整数に収める。規格 10 章)
 const VENDOR = new RegExp(DICT.vendor.pattern);
 
-/** 文字の行を [ラベル, 値...] の並びにする(空行は飛ばす) */
+const LABEL = /^[A-Z0-9_:]+$/;
+
+/**
+ * 文字の行を [ラベル, 値...] の並びにする。どの行も CR LF で終わる(最後の行も)。
+ * 空の行、LF だけの区切り、ラベルに英大文字・数字・_・: 以外がある行、ASCII の 0x20-0x7E 以外の文字は、形の正しくない行(規格 8 章)
+ */
 function parse(text) {
   const out = [];
-  for (const line of String(text).split(/\r\n|\n/)) {
-    if (!line) continue;
+  const t = String(text);
+  if (!t) return out;
+  const bad = (why, line) => Object.assign(new Error(`${why}: ${String(line).slice(0, 40)}`), { code: 'bad-line' });
+  if (!t.endsWith('\r\n')) throw bad('最後の行が CR LF で終わっていません', t.slice(-40));
+  for (const line of t.slice(0, -2).split('\r\n')) {
     if (line.length > LINE_MAX) throw Object.assign(new Error(`行が ${LINE_MAX} 文字を超えています: ${line.slice(0, 40)}`), { code: 'line-too-long' });
+    if (!line) throw bad('空の行があります', line);
+    if (!/^[\x20-\x7e]*$/.test(line)) throw bad('使えない文字があります', line);
     const i = line.indexOf('=');
-    if (i <= 0) throw Object.assign(new Error(`行の形が正しくありません: ${line.slice(0, 40)}`), { code: 'bad-line' });
-    out.push([line.slice(0, i).toUpperCase(), ...line.slice(i + 1).split(';')]);
+    if (i <= 0 || !LABEL.test(line.slice(0, i))) throw bad('行の形が正しくありません', line);
+    out.push([line.slice(0, i), ...line.slice(i + 1).split(';')]);
   }
   return out;
 }
@@ -59,11 +69,26 @@ function checkValue(spec, v) {
       const n = m[1] === '-' ? -Number(m[2]) || 0 : Number(m[2]);
       return (spec.min === undefined || n >= spec.min) && (spec.max === undefined || n <= spec.max);
     }
-    case 'dec': return parseDec(v, spec.scale, !!spec.signed) !== null;
-    case 'enum': return Object.prototype.hasOwnProperty.call(spec.values, v);
-    case 'text': return v.length <= (spec.max || 80) && /^[\x20-\x7e]*$/.test(v) && !/[=;]/.test(v) && (!spec.pattern || new RegExp(spec.pattern).test(v));
+    case 'dec': {
+      const n = parseDec(v, spec.scale, !!spec.signed);
+      if (n === null) return false;
+      const unit = 10 ** spec.scale;   // min・max は値そのものの範囲(整数で書く)
+      return (spec.min === undefined || n >= spec.min * unit) && (spec.max === undefined || n <= spec.max * unit);
+    }
+    case 'enum': return enumKey(spec, v) !== null;
+    case 'text': return v.length <= (spec.max || 80) && /^[\x20-\x7e]*$/.test(v) && !v.includes(';') && (!spec.pattern || new RegExp(spec.pattern).test(v));
     default: return false;
   }
+}
+
+/** 決まった値の、辞書の上の名前。値が数のものは数として比べる(ETYP=+1 は 1。規格 10 章)。無ければ null */
+function enumKey(spec, v) {
+  if (Object.prototype.hasOwnProperty.call(spec.values, v)) return v;
+  if (!/^[+-]?\d+$/.test(v)) return null;
+  const n = parseDec(v, 0, true);
+  if (n === null) return null;
+  const k = Object.keys(spec.values).find(x => /^-?\d+$/.test(x) && Number(x) === n);
+  return k === undefined ? null : k;
 }
 
 /** 1 つのレコードの値を確かめる。だめなら理由、よければ null */
@@ -80,7 +105,10 @@ function checkRecord([label, ...fields]) {
   }
   const n = { single: [1], chiral: [2], either: [1, 2] }[def.kind];
   if (n && !n.includes(fields.length)) return bad(`値の数が ${fields.length} です(${n.join(' か ')})`);
-  for (const v of fields) if (!checkValue(def, v)) return bad(`値 ${v} は受けられません`);
+  // 右眼;左眼の 2 つの値: 片眼のジョブでは値の無い側を空にする。両側とも空のものは受けない(規格 10 章)
+  const sided = fields.length === 2 && (def.kind === 'chiral' || def.kind === 'either');
+  if (sided && fields[0] === '' && fields[1] === '') return bad('両側とも空です');
+  for (const v of fields) if (!(sided && v === '') && !checkValue(def, v)) return bad(`値 ${v} は受けられません`);
   return null;
 }
 
@@ -92,23 +120,71 @@ function checkRecord([label, ...fields]) {
  */
 function classify(records, { accepts = null, ext = new Set() } = {}) {
   const used = new Set(), ignored = new Set(), rejected = new Set(), reasons = [];
+  const seen = new Set();
+  let traceOk = false;   // 直前の TRCFMT が正しい値か(R・A は正しい TRCFMT に続くときだけ受ける)
+  // ジョブの眼(1 = 右眼、2 = 左眼。規格 10 章): DO があれば DO、無ければ値を 2 つ書いた項目の値のある側と玉型の眼を合わせたもの
+  const EYE = { R: 1, L: 2 };
+  const DO_EYES = { R: 1, L: 2, B: 3, N: 0 };
+  let union = 0, traceEyes = 0, doEyes = null, mode = null;
+  const sides = new Map();   // ラベル → 値のある側の並び
+  const traces = [];         // 玉型の眼
   for (const r of records) {
     const label = r[0];
-    if (label === 'JOB') continue;
+    if (label === 'JOB') {
+      // JOB は分ける対象にしないが、値を受けられないか 2 度目なら REJECTED=JOB(規格 10 章)
+      const why = checkRecord(r) || (seen.has('JOB') ? 'JOB: 同じメッセージに 2 度あります' : null);
+      seen.add('JOB');
+      if (why) { rejected.add('JOB'); reasons.push(why); }
+      continue;
+    }
     const vendor = VENDOR.test(label);
     const known = vendor ? ext.has(label.split(':')[0]) : !!DICT.labels[label];
     if (!known || (accepts && !accepts.has(label))) { ignored.add(label); continue; }
-    const why = vendor ? null : checkRecord(r);
+    const def = vendor ? null : DICT.labels[label];
+    let why = vendor ? null : checkRecord(r);
+    if (def && (def.kind === 'chiral' || def.kind === 'either') && r.length === 3) {
+      const m = (r[1] !== '' ? 1 : 0) | (r[2] !== '' ? 2 : 0);
+      union |= m;
+      sides.set(label, [...(sides.get(label) || []), m]);
+    }
+    if (label === 'DO' && !why && doEyes === null) doEyes = DO_EYES[enumKey(def, r[1])];
+    if (label === 'TRCFMT') {
+      const eye = EYE[r[4]] || 0;
+      union |= eye;
+      traces.push(eye);
+      mode = r[3];
+      // 玉型は眼ごとに 1 つまで
+      if (!why && eye && (traceEyes & eye)) why = 'TRCFMT: 同じ眼の玉型が 2 つあります';
+      traceEyes |= eye;
+    }
+    // 等角度の玉型には A を置かない
+    if (label === 'A' && !why && mode === 'E') why = 'A: 等角度の玉型に A があります';
+    // 値が 1 つの項目の 2 度目(TRCFMT は玉型ごとに数える)
+    if (!why && def && (def.kind === 'single' || def.kind === 'either') && label !== 'TRCFMT') {
+      if (seen.has(label)) why = `${label}: 同じメッセージに 2 度あります`;
+      seen.add(label);
+    }
+    if (label === 'TRCFMT') traceOk = !why;
+    else if ((label === 'R' || label === 'A') && !why && !traceOk) why = `${label}: 正しい TRCFMT の行に続いていません`;
     if (why) { rejected.add(label); reasons.push(why); continue; }
     used.add(label);
   }
+  // 値のある側がジョブの眼と違う項目と、ジョブの眼に無い眼の玉型は受けない
+  const eyes = doEyes === null || doEyes === undefined ? union : doEyes;
+  for (const [label, ms] of sides) {
+    if (ms.some(m => m !== eyes)) { rejected.add(label); reasons.push(`${label}: 値のある側がジョブの眼と違います`); }
+  }
+  if (traces.some(e => e & ~eyes)) { rejected.add('TRCFMT'); reasons.push('TRCFMT: ジョブの眼に無い眼の玉型です'); }
+  // 点の数か行の順が合わない玉型は、REJECTED に TRCFMT を入れる
+  for (const why of checkTraces(records)) { rejected.add('TRCFMT'); reasons.push(why); }
   // 項目の間の決まり(BEVP なら BEVM が要る、など)
   for (const rule of DICT.rules) {
     const hit = records.some(r => r[0] === rule.if.label && used.has(r[0]) &&
       (rule.if.field !== undefined ? [r[1 + rule.if.field]] : r.slice(1)).some(v => rule.if.in.includes(v)));
     if (!hit) continue;
     for (const need of rule.require) {
-      if (!records.some(x => x[0] === need)) { rejected.add(rule.if.label); reasons.push(`${rule.if.label}: ${rule.about}`); }
+      // 捨てた行は、require を満たさない
+      if (!records.some(x => x[0] === need && !ignored.has(need))) { rejected.add(rule.if.label); reasons.push(`${rule.if.label}: ${rule.about}`); }
     }
   }
   for (const l of rejected) used.delete(l);
@@ -123,13 +199,24 @@ function checkTraces(records) {
     if (!cur) return;
     if (cur.r !== cur.n) out.push(`TRCFMT=${cur.f.join(';')}: 点の数 ${cur.n} に対して半径が ${cur.r} 個`);
     if (cur.mode === 'U' && cur.a !== cur.n) out.push(`TRCFMT=${cur.f.join(';')}: 不等角度で角度が ${cur.a} 個`);
+    if (cur.order) out.push(`TRCFMT=${cur.f.join(';')}: ${cur.order}`);
   };
   for (const [label, ...f] of records) {
-    if (label === 'TRCFMT') { close(); cur = { f, n: Number(f[1]), mode: f[2], r: 0, a: 0 }; } else if (label === 'R' && cur) cur.r += f.length;
-    else if (label === 'A' && cur) cur.a += f.length;
+    if (label === 'TRCFMT') { close(); cur = { f, n: Number(f[1]), mode: f[2], r: 0, a: 0, last: null, order: null }; } else if (label === 'R' && cur) {
+      if (cur.a && !cur.order) cur.order = 'R の行が A の行の後にあります';
+      cur.r += f.length;
+    } else if (label === 'A' && cur) {
+      // A は 0 以上で始め、増える一方(規格 10 章)
+      for (const v of f) {
+        const n = Number(v);
+        if (cur.last !== null && !(n > cur.last) && !cur.order) cur.order = '角度が増える一方になっていません';
+        cur.last = n;
+      }
+      cur.a += f.length;
+    }
   }
   close();
   return out;
 }
 
-module.exports = { parse, format, parseDec, checkRecord, classify, checkTraces, DICT, VENDOR };
+module.exports = { parse, format, parseDec, enumKey, checkRecord, classify, checkTraces, DICT, VENDOR };

@@ -102,13 +102,15 @@ test('UART の使用中: 同じ機器がやり直してハンドシェイクを�
   done(host, dev, again);
 });
 
-test('REQUIRE: 相手の EXT に無ければ、ホストも機器も理由 5 で断る。あれば話す', async () => {
+test('REQUIRE: 相手の EXT に無ければ、ホストも機器も理由 5 で断る。自分の EXT に無いものを求める相手も断る。あれば話す', async () => {
   const ext = ['EXT', 'ACME'];
   for (const [hostExtra, devExtra, ok] of [
-    [[['REQUIRE', 'ACME']], [], false],
-    [[], [['REQUIRE', 'ACME']], false],
-    [[['REQUIRE', 'ACME']], [ext], true],
+    [[['REQUIRE', 'ACME'], ext], [], false],
+    [[], [['REQUIRE', 'ACME'], ext], false],
+    [[['REQUIRE', 'ACME'], ext], [ext], true],
     [[ext], [['REQUIRE', 'ACME'], ext], true],
+    // REQUIRE= の名前空間を自分の EXT= に書かなかった相手も、理由 5 で断る(規格 9 章)
+    [[['REQUIRE', 'ACME']], [ext], false],
   ]) {
     const hk = P.noise.keyPair(), dk = P.noise.keyPair();
     const w = wire();

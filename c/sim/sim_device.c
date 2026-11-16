@@ -67,7 +67,8 @@ static void load_key(uint8_t priv[32]) {
     fclose(f);
 }
 
-/* ペアリングしたホストか。受付中なら覚える */
+/* ペアリングしたホストか。受付中なら信じる(覚えるのは受け入れの通知を受けたとき。規格 6 章) */
+static char pend_host[20];
 static int trust(void *app, const uint8_t pub[32], const char *fp, const char *caps, size_t len) {
     char p[300], line[64];
     FILE *f;
@@ -78,10 +79,24 @@ static int trust(void *app, const uint8_t pub[32], const char *fp, const char *c
         fclose(f);
     }
     if (!pairing) return 0;
-    f = fopen(p, "a");
-    fprintf(f, "%s\n", fp);
-    fclose(f);
+    snprintf(pend_host, sizeof pend_host, "%s", fp);
     return 1;
+}
+
+static void remember_host(void) {
+    char p[300];
+    FILE *f;
+    if (!pend_host[0]) return;
+    path_of(p, sizeof p, "hosts");
+    if ((f = fopen(p, "a"))) { fprintf(f, "%s\n", pend_host); fclose(f); }
+    pend_host[0] = 0;
+}
+
+/* 時計(ハンドシェイクの時間を数える。規格 4・6 章) */
+static uint32_t clock_ms(void) {
+    struct timespec t;
+    clock_gettime(CLOCK_MONOTONIC, &t);
+    return (uint32_t)(t.tv_sec * 1000 + t.tv_nsec / 1000000);
 }
 
 static int open_socket(const char *connect_to, const char *listen_port) {
@@ -205,13 +220,15 @@ int main(int argc, char **argv) {
     oldp_public_key(pub, priv);
     oldp_fingerprint(pub, fp);
     printf("ID %s\n", fp);
-    snprintf(caps, sizeof caps, "VER=1.0\r\nDEV=EDG\r\nVEN=SIM-C\r\nMODEL=EDGER\r\nSN=C-E1\r\nMAXFRAME=%d\r\n"
+    snprintf(caps, sizeof caps, "VER=1.1\r\nDEV=EDG\r\nVEN=SIM-C\r\nMODEL=EDGER\r\nSN=C-E1\r\nMAXFRAME=%d\r\n"
              "LABELS=JOB;DO;DBL;HBOX;VBOX;CIRC;FCRV;TRCFMT;R;A\r\nLABELS=ETYP;BEVP;BEVM;BEVC;POLISH;LIND;SPH;CYL;AX;IPD;OCHT\r\nTRACE=%d;E\r\n", OLDP_FRAME_MAX, trace);
     if ((fd = open_socket(connect_to, listen_port)) < 0) { printf("つなげません\n"); return 1; }
     oldp_dev_init(&dev, (oldp_io){ &fd, fd_write, fd_read, 0 }, uart ? OLDP_UART : OLDP_TCP, priv, caps, rng);
     dev.trust = trust;
+    dev.now_ms = clock_ms;
     dev.on_request = on_request;
     r = oldp_dev_open(&dev);
+    if (!r) remember_host();
     if (!r && !strcmp(verb, "put")) r = op_put(a1, &status);
     else if (!r && !strcmp(verb, "get")) r = op_get(a1, &status);
     else if (!r && !strcmp(verb, "ops")) {

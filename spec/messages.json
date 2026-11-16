@@ -1,6 +1,6 @@
 {
   "name": "optical-lab-device-protocol",
-  "version": "1.0",
+  "version": "1.1",
   "frame": {
     "version": 1,
     "minSize": 512,
@@ -26,7 +26,8 @@
     "4": "受けられない値がある",
     "5": "大きすぎる",
     "6": "いまは受けられない(取り込み中など)",
-    "7": "相手の内部の誤り"
+    "7": "相手の内部の誤り",
+    "8": "同じ JOB で中身の違うジョブがある"
   },
   "fail": {
     "1": "バージョンが合わない",
@@ -40,7 +41,7 @@
     "rejected": "REJECTED"
   },
   "capabilities": {
-    "labels": ["VER", "DEV", "VEN", "MODEL", "SN", "MAXFRAME", "LABELS", "TRACE", "EXT", "REQUIRE"],
+    "labels": ["VER", "DEV", "VEN", "MODEL", "SN", "MAXFRAME", "MAXREQ", "LABELS", "TRACE", "EXT", "REQUIRE"],
     "required": ["VER", "DEV", "VEN", "MODEL", "MAXFRAME"],
     "repeatable": ["LABELS", "EXT", "REQUIRE"]
   },
@@ -50,13 +51,13 @@
     "initiator": "device",
     "fingerprint": { "hash": "SHA-256", "bytes": 10, "groupSize": 4, "format": "base32-crockford" }
   },
-  "timeouts": { "handshakeMs": 120000, "responseMs": 30000 },
+  "timeouts": { "handshakeMs": 120000, "firstMessageMs": 10000, "responseMs": 30000, "keepAliveMs": 300000 },
   "pairing": { "windowMs": 300000 },
   "tcp": { "lengthBytes": 2, "defaultPort": 33520, "maxHandshakes": 8 },
   "uart": {
     "default": { "baud": 9600, "dataBits": 8, "parity": "none", "stopBits": 1 },
-    "bauds": [9600, 19200, 38400, 57600, 115200],
-    "baudTolerancePercent": 2.5,
+    "bauds": [9600, 19200, 38400, 57600, 115200, 230400, 460800, 921600],
+    "baudTolerancePercent": 2,
     "crc": "CRC-32",
     "delimiter": 0,
     "kinds": { "frame": 0, "ack": 1 },

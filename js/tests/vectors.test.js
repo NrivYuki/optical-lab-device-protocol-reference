@@ -89,14 +89,15 @@ test('セッションのテストベクタ: ホストの側のフレームがバ
 
 test('項目の扱いのテストベクタ', () => {
   for (const c of REC.cases) {
-    const recs = R.parse(c.lines.join('\r\n'));
+    const recs = R.parse(c.lines.map(l => l + '\r\n').join(''));
     const out = R.classify(recs, { accepts: c.accept ? new Set(c.accept) : null, ext: new Set(c.ext) });
     assert.deepEqual(out.used.sort(), [...c.used].sort(), `${c.name}: used`);
     assert.deepEqual(out.ignored.sort(), [...c.ignored].sort(), `${c.name}: ignored`);
     assert.deepEqual(out.rejected.sort(), [...c.rejected].sort(), `${c.name}: rejected ${out.reasons}`);
     assert.equal(R.checkTraces(recs).length > 0, c.badTrace, `${c.name}: badTrace`);
   }
-  for (const line of REC.malformed) assert.throws(() => R.parse(line), { code: /bad-line|line-too-long/ }, line);
+  for (const line of REC.malformed) assert.throws(() => R.parse(line + '\r\n'), { code: /bad-line|line-too-long/ }, line);
+  for (const text of REC.malformedText) assert.throws(() => R.parse(text), { code: 'bad-line' }, JSON.stringify(text));
 });
 
 test('UART: 同じ番号でも中身が違えば新しいフレームとして受ける(機器がやり直したとき)', () => {
@@ -247,12 +248,92 @@ test('UART の使用中のテストベクタ: ホストは確かめられない�
 test('REQUIRE= の判定のテストベクタ', async () => {
   for (const c of V.capabilities) {
     const [a, b] = linePair();
-    const host = new P.Session({ link: new P.UartLink(b, { ackTimeoutMs: 50 }), role: 'host', keys: keys('host'), caps: [...caps('host'), ...R.parse(c.host.join('\r\n'))], trust: () => true });
-    const dev = new P.Session({ link: new P.UartLink(a, { ackTimeoutMs: 50 }), role: 'device', keys: keys('device'), caps: [...caps('device'), ...R.parse(c.device.join('\r\n'))], trust: () => true });
+    const host = new P.Session({ link: new P.UartLink(b, { ackTimeoutMs: 50 }), role: 'host', keys: keys('host'), caps: [...caps('host'), ...R.parse(c.host.map(l => l + '\r\n').join(''))], trust: () => true });
+    const dev = new P.Session({ link: new P.UartLink(a, { ackTimeoutMs: 50 }), role: 'device', keys: keys('device'), caps: [...caps('device'), ...R.parse(c.device.map(l => l + '\r\n').join(''))], trust: () => true });
     host.on('error', () => {}); dev.on('error', () => {});
     host.start().catch(() => {});
     if (c.fail) await assert.rejects(dev.start(), e => e.failCode === c.fail, c.name);
     else { await dev.start(); await host.opened; }
     host.close(); dev.close();
+  }
+});
+
+/** 送ったフレームを並べるだけのトランスポート */
+class CaptureLink extends EventEmitter {
+  constructor({ isUart = false } = {}) { super(); this.sent = []; this.isUart = isUart; }
+  send(frame) { this.sent.push(frame.toString('hex')); return Promise.resolve(); }
+  close() { this.closed = true; }
+}
+
+test('一時鍵が位数の小さい点のテストベクタ: ホストも機器も、失敗(理由 2)を送る', async () => {
+  for (const c of V.smallOrder) {
+    const link = new CaptureLink();
+    const s = new P.Session({ link, role: c.role, keys: keys(c.role), caps: caps(c.role), e: c.ephemeral ? P.noise.keyPair(hex(c.ephemeral)) : null, trust: () => true });
+    s.on('error', () => {});
+    s.start().catch(() => {});
+    link.emit('frame', hex(c.frame));
+    await new Promise(r => setTimeout(r, 20));
+    assert.equal(link.sent[link.sent.length - 1], c.reply, c.name);
+  }
+});
+
+test('UART の受け取りのテストベクタ: 返す ACK と、上の層へ渡すフレーム', () => {
+  const stream = new EventEmitter();
+  const writes = [];
+  stream.write = d => { writes.push(Buffer.from(d).toString('hex')); return true; };
+  const link = new P.UartLink(stream);
+  const got = [];
+  link.on('frame', f => got.push(f.toString('hex')));
+  for (const c of V.uartReceive) {
+    writes.length = 0; got.length = 0;
+    stream.emit('data', hex(c.wire));
+    assert.deepEqual(writes, c.ack ? [c.ack] : [], `${c.name}: ACK`);
+    assert.deepEqual(got, c.deliver ? [c.deliver] : [], `${c.name}: 渡すフレーム`);
+  }
+});
+
+test('受け入れを待つ間のテストベクタ: UART の機器は、解けないデータのフレームを捨てて受け入れの通知を待つ', async () => {
+  const link = new ScriptLink('device', V.session.acceptGuard);
+  link.isUart = true;
+  const s = new P.Session({ link, role: 'device', keys: keys('device'), caps: caps('device'), e: eph('device'), trust: p => p.fingerprint === S.host.fingerprint });
+  await Promise.all([s.start(), Promise.resolve().then(() => link.run())]);
+  assert.deepEqual(link.errors, []);
+  assert.equal(link.i, V.session.acceptGuard.length);
+  assert.ok(s.ready);
+});
+
+test('UART のやり直しのテストベクタ: 機器とホストのフレームがバイト列まで一致する', async () => {
+  const R0 = V.session.uartRestart;
+  // 機器: 前のセッションを終えた後、新しい一時鍵でハンドシェイクをやり直す
+  {
+    const link = new ScriptLink('device', [...S.steps, ...R0.steps]);
+    link.isUart = true;
+    const s = new P.Session({ link, role: 'device', keys: keys('device'), caps: caps('device'), e: eph('device'), trust: p => p.fingerprint === S.host.fingerprint });
+    await Promise.all([s.start(), Promise.resolve().then(() => link.run())]);
+    await s.request('PUT', R.parse(S.put));
+    await s.request('GET', R.parse(S.get));
+    await s.request('RESULT', R.parse(S.result));
+    const reopened = new Promise(r => s.once('open', r));
+    s.restartDevice({ e: P.noise.keyPair(hex(R0.ephemeral)) });
+    await reopened;
+    assert.deepEqual(link.errors, []);
+    assert.equal(link.i, S.steps.length + R0.steps.length);
+  }
+  // ホスト: 前のセッションを続けたまま新しいハンドシェイクを受け、受け入れたら入れ替える
+  {
+    const link = new ScriptLink('host', [...S.steps, ...R0.steps]);
+    link.isUart = true;
+    // 一時鍵は 2 度使わない(規格 2 章): やり直しのハンドシェイクでは、ベクタの 2 つ目の一時鍵を使う
+    const es = [eph('host'), P.noise.keyPair(hex(R0.hostEphemeral))];
+    const s = new P.Session({
+      link, role: 'host', keys: keys('host'), caps: caps('host'), e: () => es.shift(), trust: p => p.fingerprint === S.device.fingerprint,
+      handlers: { PUT: () => 0, GET: () => ({ records: R.parse(S.data) }), RESULT: () => 0 },
+    });
+    const opened = s.start();
+    link.run();
+    await opened;
+    await new Promise(r => setTimeout(r, 150));
+    assert.deepEqual(link.errors, []);
+    assert.equal(link.i, S.steps.length + R0.steps.length);
   }
 });

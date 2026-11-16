@@ -1,11 +1,11 @@
 {
-  "version": "1.0",
-  "about": "項目の辞書(規格の正本)。名前と単位は VCA(DCS)に合わせる。kind: single=値 1 つ / chiral=右眼;左眼 / either=値 1 つ(両眼)か右眼;左眼 / list=値の並び(行を重ねて続ける)。type: int=整数 / dec=固定小数点の文字(scale は小数点以下の桁数の上限。整数×10^scale で扱う) / enum=決まった値 / text=文字(max は文字数) / fields=決まった並び",
+  "version": "1.1",
+  "about": "項目の辞書(規格の 10 章)。名前と単位は VCA(DCS)に合わせる。kind: single=値 1 つ / chiral=右眼;左眼(片眼のジョブでは片側を空にする) / either=値 1 つ(両眼)か右眼;左眼 / list=値の並び(行を重ねて続ける)。type: int=整数 / dec=固定小数点の文字(scale は小数点以下の桁数の上限。整数×10^scale で扱う。min・max は値そのものの範囲) / enum=決まった値 / text=文字(max は文字数) / fields=決まった並び",
   "labels": {
     "JOB": { "kind": "single", "type": "text", "max": 40, "about": "ジョブの名前(人が付けた名前)" },
     "DO": { "kind": "single", "type": "enum", "values": { "R": "右眼だけ", "L": "左眼だけ", "B": "両眼", "N": "どちらでもない" }, "about": "このジョブで扱う眼" },
     "STATUS": { "kind": "single", "type": "fields", "fields": [{ "type": "int" }, { "type": "text", "max": 60, "optional": true }], "about": "結果の番号と説明(番号は messages.json の status)" },
-    "TIME": { "kind": "single", "type": "text", "max": 14, "pattern": "^[0-9]{14}$", "about": "協定世界時の年月日時分秒(YYYYMMDDhhmmss)" },
+    "TIME": { "kind": "single", "type": "text", "max": 14, "pattern": "^[0-9]{4}(0[1-9]|1[0-2])(0[1-9]|[12][0-9]|3[01])([01][0-9]|2[0-3])[0-5][0-9][0-5][0-9]$", "about": "協定世界時の年月日時分秒(YYYYMMDDhhmmss)" },
     "DEV": { "kind": "single", "type": "text", "max": 3, "about": "機器の種類(DCS の DEV に合わせる。TRC・EDG など)" },
     "VEN": { "kind": "single", "type": "text", "max": 16, "about": "メーカー" },
     "MODEL": { "kind": "single", "type": "text", "max": 16, "about": "機種" },
@@ -37,14 +37,14 @@
 
     "SPH": { "kind": "chiral", "type": "dec", "scale": 2, "signed": true, "unit": "D", "about": "球面度数" },
     "CYL": { "kind": "chiral", "type": "dec", "scale": 2, "signed": true, "unit": "D", "about": "円柱度数" },
-    "AX": { "kind": "chiral", "type": "dec", "scale": 2, "unit": "度", "about": "円柱軸" },
+    "AX": { "kind": "chiral", "type": "dec", "scale": 2, "min": 0, "max": 180, "unit": "度", "about": "円柱軸" },
     "ADD": { "kind": "chiral", "type": "dec", "scale": 2, "signed": true, "unit": "D", "about": "加入度数" },
     "IPD": { "kind": "chiral", "type": "dec", "scale": 2, "unit": "mm", "about": "片眼の瞳孔間距離(遠用)" },
     "NPD": { "kind": "chiral", "type": "dec", "scale": 2, "unit": "mm", "about": "片眼の瞳孔間距離(近用)" },
     "OCHT": { "kind": "chiral", "type": "dec", "scale": 2, "unit": "mm", "about": "光学中心の高さ" },
     "SEGHT": { "kind": "chiral", "type": "dec", "scale": 2, "unit": "mm", "about": "小玉・累進の基準の高さ" },
     "LIND": { "kind": "chiral", "type": "dec", "scale": 3, "about": "レンズの屈折率" },
-    "LMATID": { "kind": "chiral", "type": "int", "about": "レンズの素材の番号" },
+    "LMATID": { "kind": "chiral", "type": "int", "min": 1, "about": "レンズの素材の番号" },
     "DIA": { "kind": "chiral", "type": "dec", "scale": 2, "unit": "mm", "about": "レンズの外径" },
 
     "ETYP": {
@@ -57,7 +57,7 @@
       "values": { "0": "手動", "1": "前面から(BEVM mm)", "2": "前面からの割合(BEVM %)", "3": "フレームカーブに沿う(BEVC・BEVM)", "4": "前後の中央", "5": "後面から(BEVM mm)", "7": "加工機の設定に従う", "10": "フリーフロート" },
       "about": "ヤゲン・溝の位置の決め方"
     },
-    "BEVM": { "kind": "chiral", "type": "dec", "scale": 2, "about": "ヤゲン・溝の位置(BEVP によって mm か %)" },
+    "BEVM": { "kind": "chiral", "type": "dec", "scale": 2, "min": 0, "max": 100, "about": "ヤゲン・溝の位置(BEVP によって mm か %)" },
     "BEVC": { "kind": "chiral", "type": "dec", "scale": 2, "about": "ヤゲン・溝を沿わせるカーブ" },
     "POLISH": {
       "kind": "single", "type": "enum",

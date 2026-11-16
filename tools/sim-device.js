@@ -30,29 +30,37 @@ const hosts = fs.existsSync(hostsFile) ? JSON.parse(fs.readFileSync(hostsFile, '
 
 console.log(`この機器の鍵のフィンガープリント: ${P.noise.fingerprint(keys.publicKey)}`);
 
-/** ペアリングしたホストか。受付中なら、知らないホストを覚える */
+/** ペアリングしたホストか。受付中なら、知らないホストを信じる(覚えるのは受け入れの通知を受けたとき。規格 6 章) */
+let pendingHost = null;
 function trust(peer) {
   const fp = peer.fingerprint;
   if (hosts.includes(fp)) return true;
   if (!pairing) { console.log(`知らないホスト(${fp})なので話しません。ペアリングするときは --pair を付けてください`); return false; }
-  hosts.push(fp);
-  fs.writeFileSync(hostsFile, JSON.stringify(hosts, null, 1));
-  console.log(`ホストを覚えました: ${fp}(ホストの画面のフィンガープリントと同じか確かめてください)`);
+  pendingHost = fp;
   return true;
+}
+function rememberHost() {
+  if (!pendingHost) return;
+  hosts.push(pendingHost);
+  fs.writeFileSync(hostsFile, JSON.stringify(hosts, null, 1));
+  console.log(`ホストを覚えました: ${pendingHost}(ホストの画面のフィンガープリントと同じか確かめてください)`);
+  pendingHost = null;
 }
 
 /** DCS の VCA ファイルから、この規格で送るレコードを取り出す(通信用の行を除く。玉型は形式 1 のものだけ) */
 function fromVcaFile(file) {
   const skip = new Set(['REQ', 'ANS', 'JOB', 'STATUS', 'CRC', 'DEV', 'VEN', 'MODEL', 'SN', 'DO']);
-  const recs = P.records.parse(fs.readFileSync(file, 'latin1')).filter(r => !skip.has(r[0]));
+  // DCS のファイルは LF だけの区切りや空の行があるので、CR LF の行にそろえてから読む
+  const text = fs.readFileSync(file, 'latin1').split(/\r?\n/).filter(Boolean).map(l => l + '\r\n').join('');
+  const recs = P.records.parse(text).filter(r => !skip.has(r[0]));
   const bad = recs.find(r => r[0] === 'TRCFMT' && r[1] !== '1');
   if (bad) throw new Error(`TRCFMT=${bad.slice(1).join(';')}: この規格の玉型は形式 1 だけです`);
   return recs;
 }
 
 const CAPS = {
-  tracer: [['VER', '1.0'], ['DEV', 'TRC'], ['VEN', 'SIM'], ['MODEL', 'TRACER'], ['SN', 'SIM-T1'], ['MAXFRAME', '1024']],
-  edger: [['VER', '1.0'], ['DEV', 'EDG'], ['VEN', 'SIM'], ['MODEL', 'EDGER'], ['SN', 'SIM-E1'], ['MAXFRAME', '512'],
+  tracer: [['VER', '1.1'], ['DEV', 'TRC'], ['VEN', 'SIM'], ['MODEL', 'TRACER'], ['SN', 'SIM-T1'], ['MAXFRAME', '1024']],
+  edger: [['VER', '1.1'], ['DEV', 'EDG'], ['VEN', 'SIM'], ['MODEL', 'EDGER'], ['SN', 'SIM-E1'], ['MAXFRAME', '512'],
     ['LABELS', 'JOB', 'DO', 'DBL', 'HBOX', 'VBOX', 'CIRC', 'FCRV', 'TRCFMT', 'R', 'A'],
     ['LABELS', 'ETYP', 'BEVP', 'BEVM', 'BEVC', 'POLISH', 'LIND', 'SPH', 'CYL', 'AX', 'IPD', 'OCHT'],
     ['TRACE', '360', 'E']],
@@ -67,6 +75,7 @@ async function main() {
     keys, caps, trust,
     handlers: { AVAIL: ({ records }) => { console.log(`ホストからの知らせ: ジョブ ${P.records.parse(P.records.format(records)).find(r => r[0] === 'JOB')?.[1]} が用意できました`); return 0; } },
   });
+  rememberHost();
   console.log(`つながりました: ホスト ${s.peer.caps.ven} ${s.peer.caps.model}(${s.peer.fingerprint})`);
   try {
     if (mode === 'tracer') {
@@ -77,14 +86,30 @@ async function main() {
       return;
     }
     const [, , name] = rest;
-    const r = await s.request('GET', [['JOB', name]]);
+    let r;
+    try { r = await s.request('GET', [['JOB', name]]); } catch (e) {
+      // 1 つのメッセージの上限(256 KiB)を超える DATA には、RESULT の STATUS=5 で返す(規格 7 章)
+      if (e.code !== 'too-big') throw e;
+      const ack = await s.request('RESULT', [['JOB', name], ['STATUS', '5']]);
+      console.log(`GET ${name}: DATA が大きすぎるので STATUS=5 を返しました(ホストの STATUS=${ack.status})`);
+      process.exitCode = 5;
+      return;
+    }
     if (r.opName !== 'DATA') { console.log(`GET ${name}: STATUS=${r.status}`); process.exitCode = 1; return; }
+    if (r.status === 2) {
+      // 形の正しくない行のある DATA(セッションが STATUS=2 に置き換える)には、RESULT の STATUS=2 で返す(規格 10 章)
+      const ack = await s.request('RESULT', [['JOB', name], ['STATUS', '2']]);
+      console.log(`GET ${name}: 形の正しくない行があるので STATUS=2 を返しました(ホストの STATUS=${ack.status})`);
+      process.exitCode = 2;
+      return;
+    }
     const accepts = new Set(caps.filter(x => x[0] === 'LABELS').flatMap(x => x.slice(1)));
     const c = P.records.classify(r.records, { accepts });
     const traces = P.records.checkTraces(r.records);
-    const status = traces.length ? 4 : 0;
+    // 受けられない値か、点の数・行の順の合わない玉型があれば 4(規格 10 章。玉型の誤りは classify が TRCFMT として返す)
+    const status = c.rejected.length ? 4 : 0;
     console.log(`GET ${name}: ${r.records.length} レコード、玉型 ${r.records.filter(x => x[0] === 'TRCFMT').map(x => x.slice(1).join(';')).join(' / ')}`);
-    console.log(`  使った: ${c.used.join(',') || 'なし'}`);
+    console.log(`  受けられる: ${c.used.join(',') || 'なし'}`);
     if (c.ignored.length) console.log(`  捨てた: ${c.ignored.join(',')}`);
     if (c.rejected.length) console.log(`  受けられない: ${c.rejected.join(',')}(${c.reasons.join(' / ')})`);
     for (const t of traces) console.log(`  玉型の誤り: ${t}`);

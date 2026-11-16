@@ -9,7 +9,7 @@ enum { OLDP_T_INT, OLDP_T_DEC, OLDP_T_ENUM, OLDP_T_TEXT };
 #define OLDP_F_OPTIONAL 2
 #define OLDP_F_HAS_MIN 4
 #define OLDP_F_HAS_MAX 8
-#define OLDP_F_DIGITS 16
+#define OLDP_F_TIME 16
 
 typedef struct { uint8_t type, scale, flags; int32_t min, max; const char *vals; } oldp_field;
 typedef struct { const char *name; uint8_t kind, first, count; } oldp_label;
@@ -20,7 +20,7 @@ static const oldp_field OLDP_FIELDS[] = {
     { OLDP_T_ENUM, 0, 0, 0L, 0L, "R|L|B|N" },
     { OLDP_T_INT, 0, 0, 0L, 0L, 0 },
     { OLDP_T_TEXT, 0, OLDP_F_OPTIONAL, 0L, 60L, 0 },
-    { OLDP_T_TEXT, 0, OLDP_F_DIGITS, 0L, 14L, 0 },
+    { OLDP_T_TEXT, 0, OLDP_F_TIME, 0L, 14L, 0 },
     { OLDP_T_TEXT, 0, 0, 0L, 3L, 0 },
     { OLDP_T_TEXT, 0, 0, 0L, 16L, 0 },
     { OLDP_T_TEXT, 0, 0, 0L, 30L, 0 },
@@ -35,9 +35,12 @@ static const oldp_field OLDP_FIELDS[] = {
     { OLDP_T_INT, 0, OLDP_F_HAS_MIN | OLDP_F_HAS_MAX, 0L, 35999L, 0 },
     { OLDP_T_DEC, 2, 0, 0L, 0L, 0 },
     { OLDP_T_DEC, 2, OLDP_F_SIGNED, 0L, 0L, 0 },
+    { OLDP_T_DEC, 2, OLDP_F_HAS_MIN | OLDP_F_HAS_MAX, 0L, 18000L, 0 },
     { OLDP_T_DEC, 3, 0, 0L, 0L, 0 },
+    { OLDP_T_INT, 0, OLDP_F_HAS_MIN, 1L, 0L, 0 },
     { OLDP_T_ENUM, 0, 0, 0L, 0L, "1|2|3|4|5|6|-1" },
     { OLDP_T_ENUM, 0, 0, 0L, 0L, "0|1|2|3|4|5|7|10" },
+    { OLDP_T_DEC, 2, OLDP_F_HAS_MIN | OLDP_F_HAS_MAX, 0L, 10000L, 0 },
     { OLDP_T_ENUM, 0, 0, 0L, 0L, "0|1|2|3" }
 };
 #define OLDP_LABEL_COUNT 40
@@ -64,20 +67,20 @@ static const oldp_label OLDP_LABELS[] = {
     { "FCRV", OLDP_K_EITHER, 18, 1 },
     { "SPH", OLDP_K_CHIRAL, 18, 1 },
     { "CYL", OLDP_K_CHIRAL, 18, 1 },
-    { "AX", OLDP_K_CHIRAL, 17, 1 },
+    { "AX", OLDP_K_CHIRAL, 19, 1 },
     { "ADD", OLDP_K_CHIRAL, 18, 1 },
     { "IPD", OLDP_K_CHIRAL, 17, 1 },
     { "NPD", OLDP_K_CHIRAL, 17, 1 },
     { "OCHT", OLDP_K_CHIRAL, 17, 1 },
     { "SEGHT", OLDP_K_CHIRAL, 17, 1 },
-    { "LIND", OLDP_K_CHIRAL, 19, 1 },
-    { "LMATID", OLDP_K_CHIRAL, 2, 1 },
+    { "LIND", OLDP_K_CHIRAL, 20, 1 },
+    { "LMATID", OLDP_K_CHIRAL, 21, 1 },
     { "DIA", OLDP_K_CHIRAL, 17, 1 },
-    { "ETYP", OLDP_K_SINGLE, 20, 1 },
-    { "BEVP", OLDP_K_EITHER, 21, 1 },
-    { "BEVM", OLDP_K_CHIRAL, 17, 1 },
+    { "ETYP", OLDP_K_SINGLE, 22, 1 },
+    { "BEVP", OLDP_K_EITHER, 23, 1 },
+    { "BEVM", OLDP_K_CHIRAL, 24, 1 },
     { "BEVC", OLDP_K_CHIRAL, 17, 1 },
-    { "POLISH", OLDP_K_SINGLE, 22, 1 },
+    { "POLISH", OLDP_K_SINGLE, 25, 1 },
     { "PINB", OLDP_K_CHIRAL, 17, 1 },
     { "FPINB", OLDP_K_CHIRAL, 17, 1 },
     { "GWIDTH", OLDP_K_CHIRAL, 17, 1 },

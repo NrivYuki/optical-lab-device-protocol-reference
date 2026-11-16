@@ -347,6 +347,87 @@ static void test_session_vector(int uart) {
         s.t = SVGD; s.count = SVGD_STEPS; s.step = 0; s.off = 0;
         r = oldp_dev_poll(&d, 10);
         check("UART の使用中のベクタ: 確かめられないフレームを捨てて PING に答える", r == 0 && s.step == s.count && s.errors == 0);
+        /* 規格 4 章: 新しい一時鍵でハンドシェイクをやり直す(機器の番号は 0 から) */
+        s.t = SVRS; s.count = SVRS_STEPS; s.step = 0; s.off = 0;
+        d.test_e = SVRS_EPHEMERAL;
+        r = oldp_dev_open(&d);
+        check("UART のやり直しのベクタ: 新しいセッションを開ける", r == 0 && s.step == s.count && s.errors == 0);
+        /* 規格 4 章: 受け入れの通知を待つ間は、解けないデータのフレームを捨てて待つ */
+        memset(&s, 0, sizeof s);
+        s.uart = 1; s.t = SVAG; s.count = SVAG_STEPS;
+        oldp_dev_init(&d, (oldp_io){ &s, sc_write, sc_read, 0 }, OLDP_UART, SV_DEV_STATIC, SV_DEV_CAPS, rng_unused);
+        d.test_e = SV_DEV_EPHEMERAL;
+        d.trust = sv_trust;
+        r = oldp_dev_open(&d);
+        check("受け入れを待つ間のベクタ: 解けないデータのフレームを捨てて受け入れる", r == 0 && d.ready && s.step == s.count && s.errors == 0);
+    }
+}
+
+/* 形の正しくない行と中身(規格 8 章)。records.json の malformed(CR LF を付けたもの)と malformedText */
+static void test_body_form(void) {
+    char b[200];
+    unsigned i;
+    for (i = 0; i < RV_MALFORMED; i++) {
+        size_t n = strlen(RV_MALFORMED_V[i]);
+        memcpy(b, RV_MALFORMED_V[i], n); memcpy(b + n, "\r\n", 2);
+        check("形の正しくない行(中身)", !oldp_body_ok(b, n + 2));
+    }
+    for (i = 0; i < RV_MALFORMED_TEXT; i++) check("形の正しくない中身", !oldp_body_ok(RV_MALFORMED_TEXT_V[i], strlen(RV_MALFORMED_TEXT_V[i])));
+    { static const char ok[] = "JOB=A\r\nTEXT=A=B\r\nACME:X_1=2\r\n"; check("正しい中身", oldp_body_ok(ok, sizeof ok - 1)); }
+    check("非 ASCII の文字", !oldp_body_ok("TEXT=\xe9\r\n", 8));
+}
+
+/* 1 つのメッセージは 256 KiB まで(規格 7 章): 超えた DATA の RESULT は STATUS=5 */
+static void test_job_size(void) {
+    static oldp_job j;
+    char line[80];
+    unsigned i;
+    memset(line, 0, sizeof line);
+    memcpy(line, "R=", 2);
+    memset(line + 2, '1', 77);
+    oldp_job_init(&j, 0, 0);
+    oldp_job_line(&j, "TRCFMT=1;3;E;R;F", 16);
+    for (i = 0; i < 3300; i++) oldp_job_line(&j, line, 79);
+    oldp_job_finish(&j);
+    check("256 KiB を超えた中身の RESULT は STATUS=5", oldp_job_status(&j) == 5);
+}
+
+/* UART の受け取りのベクタ(規格 4 章): まとまりごとに、返す ACK と、上の層へ渡すフレーム */
+typedef struct { uint8_t in[600]; size_t in_len, in_off; uint8_t out[64]; size_t out_len; } urx_io;
+static int urx_write(void *ctx, const uint8_t *buf, size_t n) {
+    urx_io *u = ctx;
+    if (u->out_len + n > sizeof u->out) return -1;
+    memcpy(u->out + u->out_len, buf, n); u->out_len += n;
+    return 0;
+}
+static int urx_read(void *ctx, uint8_t *buf, size_t n, uint32_t timeout_ms) {
+    urx_io *u = ctx;
+    size_t take = u->in_len - u->in_off;
+    (void)timeout_ms;
+    if (!take) return 0;
+    if (take > n) take = n;
+    memcpy(buf, u->in + u->in_off, take); u->in_off += take;
+    return (int)take;
+}
+static void test_uart_receive(void) {
+    static oldp_link l;
+    static urx_io u;
+    uint8_t frame[64], want[64];
+    size_t i, fl, wl;
+    memset(&u, 0, sizeof u);
+    oldp_link_init(&l, (oldp_io){ &u, urx_write, urx_read, 0 }, OLDP_UART);
+    for (i = 0; i < PV_URX; i++) {
+        int r;
+        unhex(PV_URX_V[i].wire, u.in, &u.in_len);
+        u.in_off = 0; u.out_len = 0;
+        r = oldp_link_recv(&l, frame, sizeof frame, &fl, 1);
+        if (PV_URX_V[i].deliver[0]) {
+            unhex(PV_URX_V[i].deliver, want, &wl);
+            check(PV_URX_V[i].name, r == 0);
+            check_bytes(PV_URX_V[i].name, frame, r == 0 ? fl : 0, want, wl);
+        } else check(PV_URX_V[i].name, r == OLDP_E_TIMEOUT);
+        unhex(PV_URX_V[i].ack, want, &wl);
+        check_bytes(PV_URX_V[i].name, u.out, u.out_len, want, wl);
     }
 }
 
@@ -359,6 +440,7 @@ typedef struct {
     oldp_hs hs;
     const char *caps;
     int bad_version, zero_e;
+    int accept_mode;             /* 0: 受け入れの通知を送る、1: 代わりに PING の要求を送る、2: PING の要求の後に受け入れの通知を送る */
     uint8_t in[2048], out[4096];
     size_t in_len, out_len, out_off;
     uint8_t fail_seen;           /* 機器が送った失敗の理由 */
@@ -402,7 +484,8 @@ static int fh_write(void *ctx, const uint8_t *buf, size_t n) {
             }
         } else if (f[1] == 3) {
             oldp_hs_read(&h->hs, f + 2, fl - 2, pt, sizeof pt, &m);
-            fh_data(h, OLDP_RESULT, 0, OLDP_RESPONSE, "STATUS=0\r\n");
+            if (h->accept_mode) fh_data(h, OLDP_PING, 9, 0, "");
+            if (h->accept_mode != 1) fh_data(h, OLDP_RESULT, 0, OLDP_RESPONSE, "STATUS=0\r\n");
         } else if (f[1] == 16) {
             if (!oldp_cipher_decrypt(&h->hs.recv, f, 2, f + 2, fl - 2, pt, &m) && (pt[3] & OLDP_RESPONSE)) {
                 h->last_op = pt[0];
@@ -441,6 +524,36 @@ static void fh_start(oldp_dev *d, fake_host *h, const char *caps) {
     d->trust = fh_trust;
 }
 
+/* UART で 0x00 の無いバイトが届き続けても、時計を渡せばハンドシェイクの時間で打ち切る(規格 4 章) */
+static uint32_t flood_clock_ms;
+static uint32_t flood_clock(void) { flood_clock_ms += 10; return flood_clock_ms; }   /* 呼ぶたびに 10 ms 進む */
+static int flood_write(void *ctx, const uint8_t *buf, size_t n) { (void)ctx; (void)buf; (void)n; return 0; }
+static int flood_read(void *ctx, uint8_t *buf, size_t n, uint32_t timeout_ms) { (void)ctx; (void)n; (void)timeout_ms; buf[0] = 0x55; return 1; }
+static void test_byte_flood(void) {
+    static oldp_dev d;
+    oldp_dev_init(&d, (oldp_io){ 0, flood_write, flood_read, 0 }, OLDP_UART, SV_DEV_STATIC, SV_DEV_CAPS, rng_unused);
+    d.test_e = SV_DEV_EPHEMERAL;
+    flood_clock_ms = 0; d.now_ms = flood_clock;
+    {
+        /* 1 つ目のメッセージの ACK を待つ間に期限が来るので、再送しても ACK は来ず、時間切れか ACK 無しで終わる */
+        int r = oldp_dev_open(&d);
+        check("0x00 の無いバイトが届き続けても、ハンドシェイクの時間で打ち切る", (r == OLDP_E_TIMEOUT || r == OLDP_E_NOACK) && flood_clock_ms >= 120000 && flood_clock_ms < 125000 && !d.link.has_deadline);
+    }
+}
+
+/* 受け入れの通知を待つ間(規格 4・6 章): ほかのデータは捨てる。時計を渡せば、ハンドシェイクの時間で打ち切る */
+static uint32_t fake_clock_ms;
+static uint32_t fake_clock(void) { fake_clock_ms += 70000; return fake_clock_ms; }   /* 呼ぶたびに 70 秒進む */
+static void test_accept_wait(void) {
+    static oldp_dev d;
+    static fake_host h;
+    fh_start(&d, &h, HOST_OK_CAPS); h.accept_mode = 2;
+    check("受け入れの通知を待つ間の PING の要求は捨て、受け入れの通知で開く", oldp_dev_open(&d) == OLDP_OK && d.ready && h.responses == 0);
+    fh_start(&d, &h, HOST_OK_CAPS); h.accept_mode = 1;
+    fake_clock_ms = 0; d.now_ms = fake_clock;
+    check("時計を渡すと、ハンドシェイクを 120 秒で打ち切る(届いたフレームを読む前に)", oldp_dev_open(&d) == OLDP_E_TIMEOUT && h.out_off < h.out_len && !d.waiting);
+}
+
 static void test_device_errors(void) {
     static oldp_dev d;
     static fake_host h;
@@ -475,7 +588,7 @@ static void test_device_errors(void) {
     fh_data(&h, OLDP_AVAIL, 8, 0, "JOB=B\r\n");
     h.responses = 0;
     oldp_dev_poll(&d, 10); oldp_dev_poll(&d, 10);
-    check("機器: 1 つのフレームに収まらない要求には STATUS=5", h.responses == 1 && !strcmp(h.last, "STATUS=5\r\n"));
+    check("機器: 続きのフラグが付いた要求には STATUS=2 で 1 度だけ答え、続きは捨てる(規格 7 章)", h.responses == 1 && !strcmp(h.last, "STATUS=2\r\n"));
     check("機器: 何も来なければ時間切れ", oldp_dev_poll(&d, 1) == OLDP_E_TIMEOUT);
     {
         uint8_t junk[4] = { 0 };
@@ -483,13 +596,13 @@ static void test_device_errors(void) {
         r = oldp_dev_poll(&d, 10);
         check("機器: いま受けられない種類のフレームは理由 4 で断る", r == OLDP_E_PROTOCOL && h.fail_seen == 4);
     }
-    fh_start(&d, &h, HOST_OK_CAPS "REQUIRE=ACME\r\n");
+    fh_start(&d, &h, HOST_OK_CAPS "REQUIRE=ACME\r\nEXT=ACME\r\n");
     r = oldp_dev_open(&d);
     check("機器: ホストが求める拡張に対応していなければ理由 5 で断る", r == OLDP_E_PROTOCOL && h.fail_seen == 5);
-    fh_start(&d, &h, HOST_OK_CAPS "REQUIRE=BETA;ACME\r\nEXT=X\r\n");
-    d.caps = SV_DEV_CAPS "EXT=ACME\r\nEXT=BETA;C\r\n"; d.caps_len = strlen(d.caps);
+    fh_start(&d, &h, HOST_OK_CAPS "REQUIRE=BETA;ACME\r\nEXT=XY;BETA;ACME\r\n");
+    d.caps = SV_DEV_CAPS "EXT=ACME\r\nEXT=BETA;CC\r\n"; d.caps_len = strlen(d.caps);
     check("機器: 求められた拡張をすべて持てばつながる(行を重ねてよい)", oldp_dev_open(&d) == OLDP_OK);
-    fh_start(&d, &h, HOST_OK_CAPS "EXT=X\r\n");
+    fh_start(&d, &h, HOST_OK_CAPS "EXT=XY\r\n");
     d.caps = SV_DEV_CAPS "REQUIRE=ACME\r\nEXT=ACME\r\n"; d.caps_len = strlen(d.caps);
     r = oldp_dev_open(&d);
     check("機器: 自分が求める拡張がホストに無ければ理由 5 で断る", r == OLDP_E_PROTOCOL && h.fail_seen == 5);
@@ -533,6 +646,7 @@ static void test_capability_vectors(void) {
         fh_start(&d, &h, hc);
         d.caps = dc; d.caps_len = strlen(dc);
         r = oldp_dev_open(&d);
+        if (PV_CAP_V[i].broken_dev) continue;   /* 義務を破ったのが、ここで確かめる機器の側の件(断るのはホスト) */
         if (PV_CAP_V[i].fail) check(PV_CAP_V[i].name, r == OLDP_E_PROTOCOL && h.fail_seen == PV_CAP_V[i].fail);
         else check(PV_CAP_V[i].name, r == OLDP_OK);
     }
@@ -611,6 +725,11 @@ int main(void) {
     test_protocol_primitives();
     test_session_vector(0);
     test_session_vector(1);
+    test_uart_receive();
+    test_job_size();
+    test_body_form();
+    test_accept_wait();
+    test_byte_flood();
     test_records();
     test_device_errors();
     test_capability_vectors();

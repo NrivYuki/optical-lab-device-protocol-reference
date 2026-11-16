@@ -45,7 +45,15 @@ static int uart_read_unit(oldp_link *l, uint8_t *kind, uint8_t *seq, size_t *ble
     size_t len = 0;
     for (;;) {
         uint8_t b;
-        int r = l->io.read(l->io.ctx, &b, 1, timeout_ms);
+        uint32_t wait = timeout_ms;
+        int r;
+        if (l->has_deadline) {
+            /* 区切りの 0x00 が来ないままバイトが届き続けても、期限で打ち切る */
+            int32_t left = (int32_t)(l->deadline - l->now_ms());
+            if (left <= 0) return OLDP_E_TIMEOUT;
+            if ((uint32_t)left < wait) wait = (uint32_t)left;
+        }
+        r = l->io.read(l->io.ctx, &b, 1, wait);
         if (r < 0) return OLDP_E_IO;
         if (r == 0) return OLDP_E_TIMEOUT;
         if (b != 0) {
@@ -249,10 +257,41 @@ static int caps_covers(const char *req, size_t rn, const char *ext, size_t en) {
     return 1;
 }
 
-/* ホストのケイパビリティの通知を確かめる。必須の項目が無ければ理由 4、メジャーバージョンが違えば理由 1、必要な拡張が無ければ理由 5。よければ 0 */
+/* ケイパビリティの形(規格 9 章): 繰り返せない項目が 2 行ない、VER は 数.数、MAXFRAME は数。よければ 1 */
+static int caps_form_ok(const char *s, size_t n) {
+    static const char *const ONCE[] = { "VER=", "DEV=", "VEN=", "MODEL=", "SN=", "MAXFRAME=", "TRACE=", "MAXREQ=", 0 };
+    uint8_t k;
+    for (k = 0; ONCE[k]; k++) {
+        size_t i = 0, m = strlen(ONCE[k]);
+        uint8_t seen = 0;
+        while (i < n) {
+            size_t e = i, a;
+            while (e < n && s[e] != '\r' && s[e] != '\n') e++;
+            if (e - i >= m && !memcmp(s + i, ONCE[k], m)) {
+                if (seen++) return 0;
+                a = i + m;
+                if (k == 0 || k == 5 || k == 7) {   /* VER は 数.数、MAXFRAME・MAXREQ は数 */
+                    size_t dot = 0, digits = 0, q;
+                    for (q = a; q < e; q++) {
+                        if (s[q] >= '0' && s[q] <= '9') digits++;
+                        else if (k == 0 && s[q] == '.' && !dot && digits) { dot = q; digits = 0; }
+                        else return 0;
+                    }
+                    if (!digits || (k == 0 && !dot)) return 0;
+                }
+            }
+            i = e;
+            while (i < n && (s[i] == '\r' || s[i] == '\n')) i++;
+        }
+    }
+    return 1;
+}
+
+/* ホストのケイパビリティの通知を確かめる。必須の項目が無いか形が正しくなければ理由 4、メジャーバージョンが違えば理由 1、必要な拡張が無ければ理由 5。よければ 0 */
 static uint8_t caps_check(const oldp_dev *d, const char *s, size_t n) {
     static const char *const REQUIRED[] = { "VER=", "DEV=", "VEN=", "MODEL=", "MAXFRAME=", 0 };
     uint8_t k;
+    if (!caps_form_ok(s, n) || !oldp_body_ok(s, n)) return 4;
     for (k = 0; REQUIRED[k]; k++) {
         size_t i = 0, m = strlen(REQUIRED[k]);
         int found = 0;
@@ -271,15 +310,21 @@ static uint8_t caps_check(const oldp_dev *d, const char *s, size_t n) {
         }
         if (!found) return 4;
     }
-    if (!caps_covers(s, n, d->caps, d->caps_len) || !caps_covers(d->caps, d->caps_len, s, n)) return 5;
+    /* 相手の REQUIRE が自分の EXT に無い、自分の REQUIRE が相手の EXT に無い、相手の REQUIRE が相手自身の EXT に無い */
+    if (!caps_covers(s, n, d->caps, d->caps_len) || !caps_covers(d->caps, d->caps_len, s, n) || !caps_covers(s, n, s, n)) return 5;
     return 0;
 }
 
 /* データのフレームを受けて解く。plain に [操作][リクエスト ID 2][フラグ][中身]、*n に長さ */
+static uint32_t hs_wait(const oldp_dev *d);
+
 static int recv_message(oldp_dev *d, size_t *n, uint32_t timeout_ms) {
     for (;;) {
         size_t fl;
+        /* 受け入れの通知を待つ間は、捨てたフレームの後もハンドシェイクの時間の残りで待つ(規格 4 章) */
+        if (d->waiting) { timeout_ms = hs_wait(d); if (!timeout_ms) return OLDP_E_TIMEOUT; }
         int guard = d->ready && d->drop_unauth;
+        int wait = d->waiting && d->drop_unauth;      /* UART で受け入れの通知を待つ間は、解けないデータのフレームを捨てる(規格 4 章) */
         int r = oldp_link_recv(&d->link, d->frame, sizeof d->frame, &fl, timeout_ms);
         if (r == OLDP_E_FRAME && guard) continue;
         if (r) return r;
@@ -289,10 +334,10 @@ static int recv_message(oldp_dev *d, size_t *n, uint32_t timeout_ms) {
         if (d->frame[1] == OLDP_FAIL) { d->last_fail = fl > 2 ? d->frame[2] : 0; return OLDP_E_REFUSED; }
         if (d->frame[1] != OLDP_DATA) { oldp_dev_refuse(d, 4); return OLDP_E_PROTOCOL; }
         if (oldp_cipher_decrypt(&d->hs.recv, d->frame, 2, d->frame + 2, fl - 2, d->plain, n)) {
-            if (guard) continue;
+            if (guard || wait) continue;
             return OLDP_E_CRYPTO;
         }
-        if (*n < 4) return OLDP_E_PROTOCOL;
+        if (*n < 4) continue;                          /* 4 バイトに満たない中身は捨てる(規格 7 章) */
         return OLDP_OK;
     }
 }
@@ -323,18 +368,51 @@ static int send_message(oldp_dev *d, uint8_t op, uint16_t req, uint8_t flags, co
     return OLDP_OK;
 }
 
+static int dev_open(oldp_dev *d);
+
+/* ハンドシェイクの間に 1 つのフレームを待つ時間。時計があれば、始めてから OLDP_HANDSHAKE_MS までの残りを超えない。0 なら時間切れ */
+static uint32_t hs_wait(const oldp_dev *d) {
+    uint32_t used, left;
+    if (!d->now_ms) return d->timeout_ms;
+    used = d->now_ms() - d->hs_start;
+    if (used >= OLDP_HANDSHAKE_MS) return 0;
+    left = OLDP_HANDSHAKE_MS - used;
+    return left < d->timeout_ms ? left : d->timeout_ms;
+}
+
 int oldp_dev_open(oldp_dev *d) {
+    int r = dev_open(d);
+    d->waiting = 0;
+    d->link.has_deadline = 0;
+    return r;
+}
+
+static int dev_open(oldp_dev *d) {
     size_t n, fl;
     int r;
     oldp_hs_init_pub(&d->hs, 1, d->s_priv, d->s_pub, (const uint8_t *)PROLOGUE, sizeof PROLOGUE - 1);
     if (d->test_e) oldp_hs_set_ephemeral(&d->hs, d->test_e);
     d->ready = 0;
+    d->waiting = 1;
+    d->timeouts = 0;
+    d->req_over = 0;
+    d->link.tx_seq = 0;                    /* 機器はセッションの始めに 0 から付ける(規格 4 章) */
+    if (d->now_ms) {
+        d->hs_start = d->now_ms();
+        d->link.now_ms = d->now_ms;
+        d->link.deadline = d->hs_start + OLDP_HANDSHAKE_MS;
+        d->link.has_deadline = 1;
+    }
     /* -> e */
     if (oldp_hs_write(&d->hs, NULL, 0, d->out + 2, sizeof d->out - 2, &n, d->rng)) return OLDP_E_CRYPTO;
     d->out[0] = 1; d->out[1] = OLDP_HS1;
     if ((r = oldp_link_send(&d->link, d->out, n + 2))) return r;
-    /* <- e, ee, s, es とホストのケイパビリティ */
-    if ((r = oldp_link_recv(&d->link, d->frame, sizeof d->frame, &fl, d->timeout_ms))) return r;
+    /* <- e, ee, s, es とホストのケイパビリティ。UART では、前のセッションのデータのフレームを捨てて待つ */
+    do {
+        uint32_t w = hs_wait(d);
+        if (!w) return OLDP_E_TIMEOUT;
+        if ((r = oldp_link_recv(&d->link, d->frame, sizeof d->frame, &fl, w))) return r;
+    } while (d->drop_unauth && fl >= 2 && d->frame[0] == 1 && d->frame[1] == OLDP_DATA);
     if (fl < 2) { oldp_dev_refuse(d, 4); return OLDP_E_FRAME; }
     if (d->frame[0] != 1) { oldp_dev_refuse(d, 1); return OLDP_E_FRAME; }
     if (d->frame[1] == OLDP_FAIL) { d->last_fail = fl > 2 ? d->frame[2] : 0; return OLDP_E_REFUSED; }
@@ -354,9 +432,14 @@ int oldp_dev_open(oldp_dev *d) {
     if (oldp_hs_write(&d->hs, (const uint8_t *)d->caps, d->caps_len, d->out + 2, sizeof d->out - 2, &n, d->rng)) return OLDP_E_TOOBIG;
     d->out[0] = 1; d->out[1] = OLDP_HS3;
     if ((r = oldp_link_send(&d->link, d->out, n + 2))) return r;
-    /* ホストの受け入れの通知(リクエスト ID 0 の RESULT の応答)を待つ */
-    if ((r = recv_message(d, &n, d->timeout_ms))) return r;
-    if (d->plain[0] != OLDP_RESULT || d->plain[1] || d->plain[2] || !(d->plain[3] & OLDP_RESPONSE)) return OLDP_E_PROTOCOL;
+    /* ホストの受け入れの通知(リクエスト ID 0 の RESULT の応答)を待つ。ほかのデータは捨てる(規格 6 章) */
+    for (;;) {
+        uint32_t w = hs_wait(d);
+        if (!w) return OLDP_E_TIMEOUT;   /* 受け入れの通知を待つのは、ハンドシェイクの時間まで(規格 4 章) */
+        if ((r = recv_message(d, &n, w))) return r;
+        if (d->plain[0] == OLDP_RESULT && !d->plain[1] && !d->plain[2] && (d->plain[3] & OLDP_RESPONSE)) break;
+    }
+    d->waiting = 0;
     d->ready = 1;
     return OLDP_OK;
 }
@@ -376,31 +459,43 @@ static int answer(oldp_dev *d, uint8_t op, uint16_t req, const char *body, size_
     return send_message(d, rop, req, OLDP_RESPONSE, resp, rl);
 }
 
+int oldp_body_ok(const char *s, size_t n) {
+    size_t i = 0;
+    while (i < n) {
+        size_t e = i, eq = (size_t)-1, ll, q;
+        while (e < n && s[e] != '\n') { if (s[e] == '=' && eq == (size_t)-1) eq = e; e++; }
+        if (e >= n || e == i || s[e - 1] != '\r') return 0;
+        ll = e - 1 - i;
+        if (ll == 0 || ll > 80 || eq == (size_t)-1 || eq == i || eq > i + ll) return 0;
+        for (q = i; q < i + ll; q++) {
+            char c = s[q];
+            if (c < 0x20 || c > 0x7e) return 0;
+            if (q < eq && !((c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' || c == ':')) return 0;
+        }
+        i = e + 1;
+    }
+    return 1;
+}
+
 /* 受けたメッセージがホストからの要求のとき、答える */
 static int handle_request(oldp_dev *d, size_t n, uint16_t id, uint8_t flags) {
     char req_body[256];
     uint8_t rop = d->plain[0];
     size_t bl;
-    if (flags & OLDP_MORE) { d->req_over = 1; return OLDP_OK; }     /* 機器への要求は 1 つのフレームに収まるものだけを受ける */
-    if (d->req_over) {
-        d->req_over = 0;
-        return send_message(d, OLDP_RESULT, id, OLDP_RESPONSE, "STATUS=5\r\n", 10);
+    /* 機器への要求は 1 つのフレームに収める。続きのフラグが付いたものには STATUS=2 で答え、続きは捨てる(規格 7 章) */
+    if (d->req_over && id != d->req_over_id) d->req_over = 0;   /* 続きの来なかった要求のことは忘れる */
+    if (flags & OLDP_MORE) {
+        if (d->req_over) return OLDP_OK;
+        d->req_over = 1;
+        d->req_over_id = id;
+        return send_message(d, OLDP_RESULT, id, OLDP_RESPONSE, "STATUS=2\r\n", 10);
     }
+    if (d->req_over) { d->req_over = 0; return OLDP_OK; }
     bl = n - 4;
     if (bl > sizeof req_body) return send_message(d, OLDP_RESULT, id, OLDP_RESPONSE, "STATUS=5\r\n", 10);
     memcpy(req_body, d->plain + 4, bl);
-    {
-        /* 形の正しくない行(= が無い、ラベルが空、80 文字を超える)を含む要求には STATUS=2 で答える */
-        size_t i = 0;
-        while (i < bl) {
-            size_t e = i, eq = (size_t)-1, ll;
-            while (e < bl && req_body[e] != '\n') { if (req_body[e] == '=' && eq == (size_t)-1) eq = e; e++; }
-            ll = e - i;
-            if (ll && req_body[e - 1] == '\r') ll--;
-            if (ll && (ll > 80 || eq == (size_t)-1 || eq == i)) return send_message(d, OLDP_RESULT, id, OLDP_RESPONSE, "STATUS=2\r\n", 10);
-            i = e + 1;
-        }
-    }
+    /* 形の正しくない行を含む要求には STATUS=2 で答える(規格 8 章) */
+    if (!oldp_body_ok(req_body, bl)) return send_message(d, OLDP_RESULT, id, OLDP_RESPONSE, "STATUS=2\r\n", 10);
     return answer(d, rop, id, req_body, bl);
 }
 
@@ -415,7 +510,7 @@ int oldp_dev_poll(oldp_dev *d, uint32_t timeout_ms) {
 
 int oldp_dev_request(oldp_dev *d, uint8_t op, const char *body, size_t len, oldp_line_fn on_line, void *ctx, uint8_t *resp_op, int *status) {
     uint16_t req;
-    int r, stop = 0;
+    int r, stop = 0, first_op = -1;
     if (!d->ready) return OLDP_E_PROTOCOL;
     req = d->next_req++;
     if (d->next_req == 0) d->next_req = 1;
@@ -425,7 +520,14 @@ int oldp_dev_request(oldp_dev *d, uint8_t op, const char *body, size_t len, oldp
         size_t n, i;
         uint16_t id;
         uint8_t flags;
-        if ((r = recv_message(d, &n, d->timeout_ms))) return r;
+        if ((r = recv_message(d, &n, d->timeout_ms))) {
+            /* UART で応答の時間切れが 2 度続いたら、新しいハンドシェイクを始める(規格 4 章) */
+            if (r == OLDP_E_TIMEOUT && d->drop_unauth && ++d->timeouts >= 2) {
+                int r2 = oldp_dev_open(d);
+                if (r2) return r2;
+            }
+            return r;
+        }
         id = (uint16_t)(((unsigned)d->plain[1] << 8) | d->plain[2]);
         flags = d->plain[3];
         if (!(flags & OLDP_RESPONSE)) {
@@ -433,7 +535,12 @@ int oldp_dev_request(oldp_dev *d, uint8_t op, const char *body, size_t len, oldp
             continue;
         }
         if (id != req) continue;
+        if (first_op < 0) first_op = d->plain[0];
+        else if (d->plain[0] != first_op) continue;    /* 続きのフレームで操作の番号が変わったものは捨てる(規格 7 章) */
+        d->timeouts = 0;
         if (resp_op) *resp_op = d->plain[0];
+        /* 形の正しくない行があれば、長さ 0 の行として知らせる(受けた側はジョブを STATUS=2 にする。規格 8・10 章) */
+        if (on_line && !stop && !oldp_body_ok((const char *)d->plain + 4, n - 4) && on_line(ctx, (const char *)d->plain + 4, 0)) stop = 1;
         /* 中身を 1 行ずつ渡す */
         for (i = 4; i < n && !stop;) {
             size_t e = i, ll;

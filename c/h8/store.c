@@ -53,3 +53,13 @@ RAMFN uint8_t store_block(const uint8_t *data, uint32_t addr, uint8_t block, uin
 }
 
 RAMFN uint8_t store_page(const uint8_t *page, uint32_t addr, uint8_t block) { return store_block(page, addr, block, 1); }
+
+RAMFN uint8_t store_program(const uint8_t *data, uint32_t addr) {
+    uint8_t r;
+    if (!(FCCS & FCCS_FWE)) return 1;
+    if ((r = prepare(0))) return r;
+    FKEY = 0x5a;
+    r = store_call((uint32_t)data, addr, DLTOP + 16);
+    FKEY = 0;
+    return r ? 0x80 : 0;
+}

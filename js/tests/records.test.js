@@ -36,7 +36,7 @@ test('玉型の点の数が TRCFMT と合わなければ知らせる', () => {
 test('受けたジョブの項目を、使った・知らないので捨てた・受けられない、に分ける(規格 10 章)', () => {
   const recs = R.parse([
     'JOB=A-1', 'DBL=18.00', 'SPH=-4.00;-3.50', 'HBOX=52.00', 'ETYP=9', 'FOO=1', 'ACME:MODE=2', 'BETA:X=1', 'LIND=1.6000;1.600', 'POLISH=1',
-  ].join('\r\n'));
+  ].map(l => l + '\r\n').join(''));
   const c = R.classify(recs, { ext: new Set(['ACME']) });
   assert.deepEqual(c.used.sort(), ['ACME:MODE', 'DBL', 'HBOX', 'POLISH', 'SPH']);
   assert.deepEqual(c.ignored.sort(), ['BETA:X', 'FOO'], '辞書に無い・宣言していない名前空間');

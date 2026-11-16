@@ -133,6 +133,12 @@ class UartLink extends EventEmitter {
     this.queue = p.catch(() => {});
     return p;
   }
+  /** 次に送るフレームのシーケンス番号を 0 に戻す(送る順に並べる。ホストはハンドシェイクの 2 つ目から、機器はセッションの始めから。規格 4 章) */
+  resetSeq() {
+    const p = this.queue.then(() => { this.nextSeq = 0; });
+    this.queue = p.catch(() => {});
+    return p;
+  }
   close() { if (this.stream.destroy) this.stream.destroy(); }
 }
 

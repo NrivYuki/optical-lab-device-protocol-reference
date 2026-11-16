@@ -1,6 +1,6 @@
 # Optical Lab Device Protocol 参照実装
 
-OLDP(Optical Lab Device Protocol)第 1.0 版の参照実装である。機器の側を C で、ホストの側を JavaScript で書いた。機器の側には、H8/3069F の基板で動くファームウェアも含む。
+OLDP(Optical Lab Device Protocol)第 1.1 版の参照実装である。機器の側を C で、ホストの側を JavaScript で書いた。機器の側には、H8/3069F の基板で動くファームウェアも含む。
 
 規格の文章・定義・テストベクタは、規格のリポジトリ [optical-lab-device-protocol](https://github.com/NrivYuki/optical-lab-device-protocol) に置いている。テストの内容、基板で測った値、実装の制限、確かめていないことは、[docs/results.md](docs/results.md) にまとめた。
 
@@ -8,7 +8,7 @@ OLDP(Optical Lab Device Protocol)第 1.0 版の参照実装である。機器の
 
 | フォルダ | 中身 |
 |---|---|
-| `spec/` | 規格のリポジトリの `spec/`(第 1.0 版)の写し。このリポジトリでは直さない |
+| `spec/` | 規格のリポジトリの `spec/`(第 1.1 版)の写し。このリポジトリでは直さない |
 | `js/` | ホストの側の実装(Node.js 22 以上。外部のパッケージは使わない)とテスト |
 | `c/` | 機器の側の実装(C。動的なメモリ確保をしない)、そのテスト、C の模擬機器(`c/sim/sim_device.c`) |
 | `c/h8/` | H8/3069F の基板のファームウェア |
@@ -171,7 +171,7 @@ node tools/h8-ubsan.js COM3 60
 
 ## 確かめた環境
 
-文書は日本語だけで書いている。道具は Windows を前提にしている(H8 の基板の道具は PowerShell、C の組み立ては WSL)。次の環境で、テストと基板での確認を全て通した。
+文書は日本語だけで書いている。道具は Windows を前提にしている(H8 の基板の道具は PowerShell、C の組み立ては WSL)。次の環境で、テストを全て通した。基板では、第 1.1 版のファームウェアで `verify-device.js`(UART 9600 bps・LAN)を通した。ほかの基板での確認は、第 1.0 版のファームウェアで通した(docs/results.md の「確かめていないこと」)。
 
 | 対象 | 版 |
 |---|---|

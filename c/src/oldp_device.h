@@ -13,6 +13,7 @@
 #define OLDP_ACK_TIMEOUT_MS 1000     /* UART の ACK の待ち時間(規格 4 章) */
 #define OLDP_RETRIES 5
 #define OLDP_RESPONSE_MS 30000       /* 応答を待つ時間(規格 8 章) */
+#define OLDP_HANDSHAKE_MS 120000UL   /* ハンドシェイク(受け入れの通知まで)を待つ時間(規格 4・6 章) */
 
 /* 規格の番号(spec/messages.json) */
 enum { OLDP_HS1 = 1, OLDP_HS2 = 2, OLDP_HS3 = 3, OLDP_DATA = 16, OLDP_FAIL = 127 };
@@ -46,6 +47,9 @@ typedef struct {
     uint8_t tx_seq, rx_last, rx_any;
     uint32_t rx_crc, unit_crc;     /* UART: 最後に受けたフレームの CRC と、いま読んだ 1 つの CRC(同じ番号でも中身が違えば新しいフレーム) */
     uint16_t resent, bad_units;    /* UART: 再送した回数と、COBS か CRC-32 で捨てた数(線の状態を調べるため) */
+    uint32_t (*now_ms)(void);      /* 期限を数える時計(has_deadline のときだけ使う) */
+    uint32_t deadline;             /* この時刻を過ぎたら、1 バイトずつ読む間でも時間切れにする(ハンドシェイクの 120 秒。規格 4 章) */
+    uint8_t has_deadline;
     uint8_t has_pend;              /* UART: ACK を待つ間に受けたフレーム */
     size_t pend_len;
     uint8_t pend[OLDP_FRAME_MAX];
@@ -78,10 +82,15 @@ typedef struct {
     oldp_request_fn on_request;
     void *app;
     uint32_t timeout_ms;           /* 応答を待つ時間 */
+    uint32_t (*now_ms)(void);      /* 時計(ミリ秒。渡せば、ハンドシェイクを OLDP_HANDSHAKE_MS で打ち切る。NULL なら数えない) */
+    uint32_t hs_start;
     uint16_t peer_max;             /* ホストのフレームの最大長 */
     uint16_t next_req;
     uint8_t ready;
-    uint8_t req_over;              /* ホストからの要求が 1 つのフレームに収まらなかった */
+    uint8_t req_over;              /* ホストからの要求に続きのフラグがあった(STATUS=2 で答えた) */
+    uint16_t req_over_id;          /* そのリクエスト ID(違う ID の要求が来たら、続きを待つのをやめる) */
+    uint8_t waiting;               /* ハンドシェイクを始めてから受け入れの通知を受けるまで */
+    uint8_t timeouts;              /* 続けて起きた応答の時間切れの数(UART で 2 になったらやり直す。規格 4 章) */
     uint8_t drop_unauth;           /* 使用中は暗号で確かめられないフレームを捨てて続ける(UART。規格 4 章) */
     int last_fail;                 /* 断られたときの理由の番号 */
     char peer_fp[20];
@@ -93,7 +102,13 @@ typedef struct {
 void oldp_dev_init(oldp_dev *d, oldp_io io, uint8_t transport, const uint8_t s_priv[32], const char *caps, oldp_rng rng);
 /* ハンドシェイクをし、ホストの受け入れの通知を待つ */
 int oldp_dev_open(oldp_dev *d);
-/* 要求を送り、応答を待つ。応答の中身は on_line に 1 行ずつ渡す。*resp_op に応答の操作、*status に STATUS(無ければ -1) */
+/* 中身の行が全て正しい形か(規格 8 章: CR LF で終わる、空でない、80 文字まで、最初の = の前がラベル、
+ * ラベルは英大文字・数字・_・:、文字は ASCII の 0x20-0x7E)。正しければ 1 */
+int oldp_body_ok(const char *s, size_t n);
+/* 要求を送り、応答を待つ。応答の中身は on_line に 1 行ずつ渡す(形の正しくない行があれば、長さ 0 の行を 1 度渡す)。
+ * *resp_op に応答の操作、*status に STATUS(無ければ -1)。
+ * UART で応答の時間切れが 2 度続いたときは、新しいハンドシェイクを始めてから OLDP_E_TIMEOUT を返す(規格 4 章)。
+ * 開き直せていれば ready は 1 で、続けて要求を出せる */
 int oldp_dev_request(oldp_dev *d, uint8_t op, const char *body, size_t len, oldp_line_fn on_line, void *ctx, uint8_t *resp_op, int *status);
 /* ホストからの要求(AVAIL・PING など)を 1 つ待って答える。timeout_ms のあいだ何も来なければ OLDP_E_TIMEOUT */
 int oldp_dev_poll(oldp_dev *d, uint32_t timeout_ms);
